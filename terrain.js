@@ -448,6 +448,7 @@ class TerrainChunk {
         this.mesh = null;
         this.waterMesh = null;
         this.instancedMeshes = [];
+        this.heightField = null;
 
         this.build();
     }
@@ -456,6 +457,7 @@ class TerrainChunk {
         const geometry = new THREE.PlaneGeometry(this.size, this.size, this.resolution, this.resolution);
         const positions = geometry.attributes.position.array;
         const normals = geometry.attributes.normal.array;
+        this.heightField = new Float32Array((this.resolution + 1) * (this.resolution + 1));
 
         const treeData = [];
         const bushData = [];
@@ -479,6 +481,7 @@ class TerrainChunk {
             const h = this.generator.getElevation(wx, wz);
 
             positions[i * 3 + 2] = h;
+            this.heightField[i] = h;
 
             // Seamless Normals
             const n = this.generator.getNormal(wx, wz);
@@ -872,6 +875,44 @@ class TerrainChunk {
         if (yellowData.length > 0) createMushroomPlacements(yellowData, 'yellow');
     }
 
+    sampleHeightAtWorld(worldX, worldZ) {
+        if (!this.heightField) return null;
+
+        const u = (worldX - this.x) / this.size + 0.5;
+        const v = (worldZ - this.z) / this.size + 0.5;
+        if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+
+        const r = this.resolution;
+        const eps = 1e-6;
+        const gx = Math.min(Math.max(u * r, 0), r - eps);
+        const gz = Math.min(Math.max(v * r, 0), r - eps);
+
+        const ix = Math.floor(gx);
+        const iz = Math.floor(gz);
+        const fx = gx - ix;
+        const fz = gz - iz;
+
+        const row = r + 1;
+        const i00 = iz * row + ix;
+        const i10 = i00 + 1;
+        const i01 = i00 + row;
+        const i11 = i01 + 1;
+
+        const h00 = this.heightField[i00];
+        const h10 = this.heightField[i10];
+        const h01 = this.heightField[i01];
+        const h11 = this.heightField[i11];
+
+        // Match PlaneGeometry triangulation: (00,01,10) and (01,11,10).
+        if (fx + fz <= 1.0) {
+            return h00 + fx * (h10 - h00) + fz * (h01 - h00);
+        }
+
+        const ax = 1.0 - fx;
+        const az = 1.0 - fz;
+        return h11 + ax * (h01 - h11) + az * (h10 - h11);
+    }
+
     dispose() {
         if (this.mesh) {
             this.group.remove(this.mesh);
@@ -887,6 +928,7 @@ class TerrainChunk {
             mesh.dispose(); // Only dispose mesh/geometry, NOT the shared materials
         });
         this.instancedMeshes = [];
+        this.heightField = null;
     }
 }
 
@@ -1556,9 +1598,10 @@ class RainEffect {
 
 // ===== ANIMAL SYSTEM =====
 class Pig {
-    constructor(scene, generator, startPos) {
+    constructor(scene, generator, startPos, world = null) {
         this.scene = scene;
         this.generator = generator;
+        this.world = world;
         this.pingMaterial = new THREE.MeshStandardMaterial({ color: 0xffc0cb, roughness: 0.8, flatShading: true });
 
         this.group = new THREE.Group();
@@ -1583,12 +1626,12 @@ class Pig {
         // Legs
         this.legs = [];
         const legGeo = new THREE.BoxGeometry(0.3, 0.6, 0.3);
-        const legPositions = [
+        this.legOffsets = [
             [-0.4, 0, 0.7], [0.4, 0, 0.7],
             [-0.4, 0, -0.7], [0.4, 0, -0.7]
         ];
 
-        legPositions.forEach(pos => {
+        this.legOffsets.forEach(pos => {
             const leg = new THREE.Mesh(legGeo, this.pingMaterial);
             leg.position.set(pos[0], 0.3, pos[2]);
             this.legs.push(leg);
@@ -1601,9 +1644,174 @@ class Pig {
         this.angle = this.targetAngle;
         this.speed = 4.0 + Math.random() * 3.0; // Scaled speed
         this.walkCycle = 0;
+
+        this.legHalfHeight = 0.3;
+        this.legHalfWidth = 0.15;
+        this.legBaseY = 0.3;
+        this.footClearance = 0.01;
+        this.footProbeLocal = [
+            // Point-contact hoof probe to avoid over-lifting from adjacent higher triangles.
+            new THREE.Vector3(0, -this.legHalfHeight, 0)
+        ];
+
+        this.footGroundHeights = [0, 0, 0, 0];
+        this.footPoints = [
+            new THREE.Vector3(),
+            new THREE.Vector3(),
+            new THREE.Vector3(),
+            new THREE.Vector3()
+        ];
+
+        this.upAxis = new THREE.Vector3(0, 1, 0);
+        this.yawQuat = new THREE.Quaternion();
+        this.slopeQuat = new THREE.Quaternion();
+        this.groundNormal = new THREE.Vector3(0, 1, 0);
+
+        this.tmpMove = new THREE.Vector3();
+        this.tmpA = new THREE.Vector3();
+        this.tmpB = new THREE.Vector3();
+        this.tmpC = new THREE.Vector3();
+        this.tmpD = new THREE.Vector3();
+        this.tmpWorldUp = new THREE.Vector3();
+        this.tmpFootWorld = new THREE.Vector3();
+
+        this.maxHp = 10;
+        this.hp = this.maxHp;
+        this.dead = false;
+        this.createHealthbar();
     }
 
-    update(delta, time) {
+    createHealthbar() {
+        this.healthCanvas = document.createElement('canvas');
+        this.healthCanvas.width = 128;
+        this.healthCanvas.height = 24;
+        this.healthCtx = this.healthCanvas.getContext('2d');
+        this.healthTexture = new THREE.CanvasTexture(this.healthCanvas);
+
+        const healthMaterial = new THREE.SpriteMaterial({
+            map: this.healthTexture,
+            transparent: true,
+            depthTest: false,
+            depthWrite: false
+        });
+
+        this.healthbar = new THREE.Sprite(healthMaterial);
+        this.healthbar.scale.set(4.5, 0.8, 1);
+        this.healthbar.renderOrder = 5000;
+        this.healthbar.visible = false;
+        this.scene.add(this.healthbar);
+
+        this.redrawHealthbar();
+    }
+
+    redrawHealthbar() {
+        const ctx = this.healthCtx;
+        if (!ctx) return;
+
+        const w = this.healthCanvas.width;
+        const h = this.healthCanvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        if (this.hp <= 0 || this.hp >= this.maxHp) {
+            this.healthbar.visible = false;
+            this.healthTexture.needsUpdate = true;
+            return;
+        }
+
+        const pad = 2;
+        const innerX = pad + 1;
+        const innerY = pad + 1;
+        const innerW = w - 2 * (pad + 1);
+        const innerH = h - 2 * (pad + 1);
+
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.fillStyle = '#2b2b2b';
+        ctx.fillRect(innerX, innerY, innerW, innerH);
+
+        const ratio = THREE.MathUtils.clamp(this.hp / this.maxHp, 0, 1);
+        const fillW = Math.floor(innerW * ratio);
+        ctx.fillStyle = '#e53935';
+        ctx.fillRect(innerX, innerY, fillW, innerH);
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, w - 2, h - 2);
+
+        this.healthbar.visible = true;
+        this.healthTexture.needsUpdate = true;
+    }
+
+    takeDamage(amount) {
+        if (this.dead) return false;
+        this.hp = Math.max(0, this.hp - amount);
+        this.redrawHealthbar();
+
+        if (this.hp <= 0) {
+            this.die();
+            return true;
+        }
+
+        return false;
+    }
+
+    die() {
+        if (this.dead) return;
+        this.dead = true;
+        const deathPos = this.group.position.clone();
+
+        if (this.world && typeof this.world.onPigKilled === 'function') {
+            this.world.onPigKilled(this, deathPos);
+        } else {
+            this.dispose();
+        }
+    }
+
+    dispose() {
+        this.scene.remove(this.group);
+        if (this.healthbar) {
+            this.scene.remove(this.healthbar);
+            if (this.healthbar.material && this.healthbar.material.map) {
+                this.healthbar.material.map.dispose();
+            }
+            if (this.healthbar.material) this.healthbar.material.dispose();
+        }
+    }
+
+    getGroundY(x, z) {
+        if (this.world && typeof this.world.getTerrainHeightAtPosition === 'function') {
+            return this.world.getTerrainHeightAtPosition(x, z);
+        }
+        return this.generator.getElevation(x, z);
+    }
+
+    sampleFootGround(yawAngle) {
+        const sx = this.group.scale.x;
+        const sz = this.group.scale.z;
+        const px = this.group.position.x;
+        const pz = this.group.position.z;
+        const c = Math.cos(yawAngle);
+        const s = Math.sin(yawAngle);
+
+        for (let i = 0; i < this.legOffsets.length; i++) {
+            const offset = this.legOffsets[i];
+            const point = this.footPoints[i];
+
+            const lx = offset[0] * sx;
+            const lz = offset[2] * sz;
+            const legWorldX = px + lx * c + lz * s;
+            const legWorldZ = pz - lx * s + lz * c;
+            const groundY = this.getGroundY(legWorldX, legWorldZ);
+
+            this.footGroundHeights[i] = groundY;
+            point.set(legWorldX, groundY, legWorldZ);
+        }
+    }
+
+    update(delta, time, camera) {
+        if (this.dead) return;
+
         // AI: Gentle wandering
         if (Math.random() < 0.005) {
             this.targetAngle += (Math.random() - 0.5) * 2;
@@ -1612,49 +1820,80 @@ class Pig {
         this.angle += (this.targetAngle - this.angle) * 0.03;
 
         // Move forward locally
-        const moveVec = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.angle);
-        this.group.position.add(moveVec.multiplyScalar(this.speed * delta));
-
-        // Get ground elevation and normal
-        const h = this.generator.getElevation(this.group.position.x, this.group.position.z);
-        const normal = this.generator.getNormal(this.group.position.x, this.group.position.z);
+        this.tmpMove.set(0, 0, 1).applyAxisAngle(this.upAxis, this.angle);
+        this.group.position.addScaledVector(this.tmpMove, this.speed * delta);
 
         // Improved Water Avoidance
-        if (h < CONFIG.terrain.waterLevel + 4.0) {
-            this.targetAngle = this.angle + Math.PI; // Turn 180 degrees
-            const nudge = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.angle);
-            this.group.position.add(nudge.multiplyScalar(this.speed * delta * 2));
+        const centerH = this.getGroundY(this.group.position.x, this.group.position.z);
+        if (centerH < CONFIG.terrain.waterLevel + 4.0) {
+            this.targetAngle = this.angle + Math.PI;
+            this.tmpMove.set(0, 0, -1).applyAxisAngle(this.upAxis, this.angle);
+            this.group.position.addScaledVector(this.tmpMove, this.speed * delta * 2);
         }
 
-        // --- Perfect Ground Alignment ---
-        this.group.position.y = h;
+        this.sampleFootGround(this.angle);
 
-        // 1. Start with the horizontal wandering rotation
-        const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.angle);
+        // Align body to local slope from leg contact points.
+        const p0 = this.footPoints[0];
+        const p1 = this.footPoints[1];
+        const p2 = this.footPoints[2];
+        const p3 = this.footPoints[3];
+        const n1 = this.tmpA.subVectors(p1, p0).cross(this.tmpB.subVectors(p2, p0));
+        const n2 = this.tmpC.subVectors(p3, p1).cross(this.tmpD.subVectors(p2, p1));
+        this.groundNormal.copy(n1).add(n2);
+        if (this.groundNormal.lengthSq() < 1e-6) {
+            this.groundNormal.copy(this.generator.getNormal(this.group.position.x, this.group.position.z));
+        }
+        this.groundNormal.normalize();
+        if (this.groundNormal.y < 0) this.groundNormal.multiplyScalar(-1);
 
-        // 2. Align the local 'up' vector to the terrain normal
-        const up = new THREE.Vector3(0, 1, 0);
-        const slopeQuat = new THREE.Quaternion().setFromUnitVectors(up, normal);
+        this.yawQuat.setFromAxisAngle(this.upAxis, this.angle);
+        this.slopeQuat.setFromUnitVectors(this.upAxis, this.groundNormal);
+        this.group.quaternion.multiplyQuaternions(this.slopeQuat, this.yawQuat);
 
-        // 3. Combine them: Apply slope tilt to the already rotated pig
-        this.group.quaternion.multiplyQuaternions(slopeQuat, yawQuat);
+        const avgFootH = (this.footGroundHeights[0] + this.footGroundHeights[1] + this.footGroundHeights[2] + this.footGroundHeights[3]) * 0.25;
+        this.group.position.y = avgFootH + this.footClearance;
 
-        // Animation scaled to speed
         this.walkCycle += delta * (this.speed / 3.0) * 4.0;
         this.legs.forEach((leg, i) => {
             const phase = (i === 0 || i === 3) ? 0 : Math.PI;
-            leg.rotation.x = Math.sin(this.walkCycle + phase) * 0.5;
+            const walkRot = Math.sin(this.walkCycle + phase) * 0.25;
+            leg.rotation.x = walkRot;
+            leg.position.set(this.legOffsets[i][0], this.legBaseY, this.legOffsets[i][2]);
         });
+
+        // Solve each leg against exact vertical probe target on the terrain.
+        for (let iter = 0; iter < 2; iter++) {
+            this.group.updateMatrixWorld(true);
+            this.tmpWorldUp.set(0, 1, 0).applyQuaternion(this.group.quaternion);
+            const localToWorldY = Math.max(1e-4, this.group.scale.y * this.tmpWorldUp.y);
+
+            for (let i = 0; i < this.legs.length; i++) {
+                const leg = this.legs[i];
+                this.tmpFootWorld.set(0, -this.legHalfHeight, 0);
+                leg.localToWorld(this.tmpFootWorld);
+
+                const targetY = this.footGroundHeights[i] + this.footClearance;
+                const deltaLocalY = (targetY - this.tmpFootWorld.y) / localToWorldY;
+                leg.position.y += deltaLocalY;
+            }
+        }
 
         // Sync body bounce
         this.body.position.y = 0.6 + Math.abs(Math.sin(this.walkCycle)) * 0.1; // More bounce for larger body
+
+        if (this.healthbar) {
+            this.healthbar.position.set(this.group.position.x, this.group.position.y + 5.2, this.group.position.z);
+            this.healthbar.visible = this.hp > 0 && this.hp < this.maxHp;
+        }
     }
 }
 
 class Rabbit {
-    constructor(scene, generator, startPos) {
+    constructor(scene, generator, startPos, world = null) {
         this.scene = scene;
         this.generator = generator;
+        this.world = world;
         this.material = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.9, flatShading: true });
 
         this.group = new THREE.Group();
@@ -1690,12 +1929,12 @@ class Rabbit {
 
         // Legs
         this.legs = [];
-        const legGeo = new THREE.BoxGeometry(0.15, 0.3, 0.15);
-        const legPositions = [
+        this.legOffsets = [
             [-0.2, -0.2, 0.3], [0.2, -0.2, 0.3],
             [-0.2, -0.2, -0.3], [0.2, -0.2, -0.3]
         ];
-        legPositions.forEach(pos => {
+        const legGeo = new THREE.BoxGeometry(0.15, 0.3, 0.15);
+        this.legOffsets.forEach(pos => {
             const leg = new THREE.Mesh(legGeo, this.material);
             leg.position.set(pos[0], pos[1], pos[2]);
             this.legs.push(leg);
@@ -1713,6 +1952,73 @@ class Rabbit {
         this.hopProgress = 0;
         this.hopPower = 0.4;
         this.hopLength = 3.0;
+
+        this.footGroundHeights = [0, 0, 0, 0];
+        this.footPoints = [
+            new THREE.Vector3(),
+            new THREE.Vector3(),
+            new THREE.Vector3(),
+            new THREE.Vector3()
+        ];
+        this.legHalfHeight = 0.15;
+        this.footClearance = 0.01;
+
+        this.upAxis = new THREE.Vector3(0, 1, 0);
+        this.yawQuat = new THREE.Quaternion();
+        this.slopeQuat = new THREE.Quaternion();
+        this.groundNormal = new THREE.Vector3(0, 1, 0);
+
+        this.tmpMove = new THREE.Vector3();
+        this.tmpA = new THREE.Vector3();
+        this.tmpB = new THREE.Vector3();
+        this.tmpC = new THREE.Vector3();
+        this.tmpD = new THREE.Vector3();
+        this.tmpFootWorld = new THREE.Vector3();
+        this.tmpWorldUp = new THREE.Vector3();
+
+        this.baseFootOffset = 0.4 + (-0.2) - this.legHalfHeight;
+    }
+
+    getGroundY(x, z) {
+        if (this.world && typeof this.world.getTerrainHeightAtPosition === 'function') {
+            return this.world.getTerrainHeightAtPosition(x, z);
+        }
+        return this.generator.getElevation(x, z);
+    }
+
+    sampleFootGround(yawAngle) {
+        const sx = this.group.scale.x;
+        const sz = this.group.scale.z;
+        const px = this.group.position.x;
+        const pz = this.group.position.z;
+        const c = Math.cos(yawAngle);
+        const s = Math.sin(yawAngle);
+
+        for (let i = 0; i < this.legOffsets.length; i++) {
+            const off = this.legOffsets[i];
+            const lx = off[0] * sx;
+            const lz = off[2] * sz;
+            const wx = px + lx * c + lz * s;
+            const wz = pz - lx * s + lz * c;
+            const h = this.getGroundY(wx, wz);
+
+            this.footGroundHeights[i] = h;
+            this.footPoints[i].set(wx, h, wz);
+        }
+
+        const p0 = this.footPoints[0];
+        const p1 = this.footPoints[1];
+        const p2 = this.footPoints[2];
+        const p3 = this.footPoints[3];
+        const n1 = this.tmpA.subVectors(p1, p0).cross(this.tmpB.subVectors(p2, p0));
+        const n2 = this.tmpC.subVectors(p3, p1).cross(this.tmpD.subVectors(p2, p1));
+
+        this.groundNormal.copy(n1).add(n2);
+        if (this.groundNormal.lengthSq() < 1e-6) {
+            this.groundNormal.copy(this.generator.getNormal(px, pz));
+        }
+        this.groundNormal.normalize();
+        if (this.groundNormal.y < 0) this.groundNormal.multiplyScalar(-1);
     }
 
     update(delta, time) {
@@ -1733,8 +2039,8 @@ class Rabbit {
 
             // Move forward
             const moveSpeed = this.hopLength;
-            const moveVec = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.angle);
-            this.group.position.add(moveVec.multiplyScalar(moveSpeed * delta));
+            this.tmpMove.set(0, 0, 1).applyAxisAngle(this.upAxis, this.angle);
+            this.group.position.addScaledVector(this.tmpMove, moveSpeed * delta);
 
             // Jump arc
             this.body.position.y = 0.4 + Math.sin(this.hopProgress * Math.PI) * 0.8;
@@ -1755,23 +2061,40 @@ class Rabbit {
         this.angle += (this.targetAngle - this.angle) * 0.1;
 
         // Ground/Water Logic
-        const h = this.generator.getElevation(this.group.position.x, this.group.position.z);
-        const normal = this.generator.getNormal(this.group.position.x, this.group.position.z);
+        const h = this.getGroundY(this.group.position.x, this.group.position.z);
 
         if (h < CONFIG.terrain.waterLevel + 1.0) {
             this.targetAngle = this.angle + Math.PI;
             // Immediate nudge out of water
-            const nudge = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.angle);
-            this.group.position.add(nudge.multiplyScalar(5.0 * delta));
+            this.tmpMove.set(0, 0, -1).applyAxisAngle(this.upAxis, this.angle);
+            this.group.position.addScaledVector(this.tmpMove, 5.0 * delta);
         }
 
-        this.group.position.y = h;
+        this.sampleFootGround(this.angle);
 
-        // Quaternions for slope alignment
-        const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.angle);
-        const up = new THREE.Vector3(0, 1, 0);
-        const slopeQuat = new THREE.Quaternion().setFromUnitVectors(up, normal);
-        this.group.quaternion.multiplyQuaternions(slopeQuat, yawQuat);
+        const avgFootH = (this.footGroundHeights[0] + this.footGroundHeights[1] + this.footGroundHeights[2] + this.footGroundHeights[3]) * 0.25;
+        this.group.position.y = avgFootH + this.footClearance - (this.baseFootOffset * this.group.scale.y);
+
+        this.yawQuat.setFromAxisAngle(this.upAxis, this.angle);
+        this.slopeQuat.setFromUnitVectors(this.upAxis, this.groundNormal);
+        this.group.quaternion.multiplyQuaternions(this.slopeQuat, this.yawQuat);
+
+        // Solve each leg against exact vertical probe target on the terrain.
+        for (let iter = 0; iter < 2; iter++) {
+            this.group.updateMatrixWorld(true);
+            this.tmpWorldUp.set(0, 1, 0).applyQuaternion(this.group.quaternion);
+            const localToWorldY = Math.max(1e-4, this.group.scale.y * this.tmpWorldUp.y);
+
+            for (let i = 0; i < this.legs.length; i++) {
+                const leg = this.legs[i];
+                this.tmpFootWorld.set(0, -this.legHalfHeight, 0);
+                leg.localToWorld(this.tmpFootWorld);
+
+                const targetY = this.footGroundHeights[i] + this.footClearance;
+                const deltaLocalY = (targetY - this.tmpFootWorld.y) / localToWorldY;
+                leg.position.y += deltaLocalY;
+            }
+        }
     }
 }
 
@@ -2009,6 +2332,110 @@ class WallTriangle {
     }
 }
 
+class VolumetricCloudSystem {
+    constructor(scene) {
+        this.scene = scene;
+        this.group = new THREE.Group();
+        this.group.renderOrder = 1;
+        this.scene.add(this.group);
+
+        this.enabled = true;
+        this.time = 0;
+        this.bounds = 16000;
+        this.clouds = [];
+
+        this.createClouds();
+    }
+
+    createClouds() {
+        const cloudMaterial = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.45,
+            roughness: 1.0,
+            metalness: 0.0,
+            depthWrite: false
+        });
+
+        const baseSphere = new THREE.SphereGeometry(1, 10, 8);
+        const cloudCount = 36;
+
+        for (let i = 0; i < cloudCount; i++) {
+            const puffCount = 6 + Math.floor(Math.random() * 6);
+            const puffGeometries = [];
+
+            for (let p = 0; p < puffCount; p++) {
+                const puff = baseSphere.clone();
+                const matrix = new THREE.Matrix4();
+                const px = (Math.random() - 0.5) * 180;
+                const py = (Math.random() - 0.5) * 45;
+                const pz = (Math.random() - 0.5) * 120;
+                const s = 22 + Math.random() * 42;
+
+                matrix.compose(
+                    new THREE.Vector3(px, py, pz),
+                    new THREE.Quaternion(),
+                    new THREE.Vector3(s, s * (0.7 + Math.random() * 0.4), s)
+                );
+                puff.applyMatrix4(matrix);
+                puffGeometries.push(puff);
+            }
+
+            const merged = BufferGeometryUtils.mergeGeometries(puffGeometries, false);
+            puffGeometries.forEach(g => g.dispose());
+
+            const cloud = new THREE.Mesh(merged, cloudMaterial);
+            cloud.position.set(
+                (Math.random() - 0.5) * this.bounds * 2,
+                900 + Math.random() * 900,
+                (Math.random() - 0.5) * this.bounds * 2
+            );
+
+            const drift = 5 + Math.random() * 10;
+            const driftZ = (Math.random() - 0.5) * 2.5;
+            const phase = Math.random() * Math.PI * 2;
+
+            this.clouds.push({
+                mesh: cloud,
+                baseY: cloud.position.y,
+                drift,
+                driftZ,
+                phase
+            });
+            this.group.add(cloud);
+        }
+
+        baseSphere.dispose();
+    }
+
+    setEnabled(enabled) {
+        this.enabled = enabled;
+        this.group.visible = enabled;
+    }
+
+    update(delta, cameraPos) {
+        if (!this.enabled) return;
+
+        this.time += delta;
+        const minX = cameraPos.x - this.bounds;
+        const maxX = cameraPos.x + this.bounds;
+        const minZ = cameraPos.z - this.bounds;
+        const maxZ = cameraPos.z + this.bounds;
+
+        for (const cloud of this.clouds) {
+            const mesh = cloud.mesh;
+            mesh.position.x += cloud.drift * delta;
+            mesh.position.z += cloud.driftZ * delta;
+            mesh.position.y = cloud.baseY + Math.sin(this.time * 0.08 + cloud.phase) * 10;
+
+            if (mesh.position.x > maxX) mesh.position.x = minX;
+            if (mesh.position.x < minX) mesh.position.x = maxX;
+            if (mesh.position.z > maxZ) mesh.position.z = minZ;
+            if (mesh.position.z < minZ) mesh.position.z = maxZ;
+        }
+    }
+}
+
 // ===== MAIN SCENE =====
 class TerrainScene {
     constructor() {
@@ -2024,9 +2451,15 @@ class TerrainScene {
         this.viewDistance = 6000;
         this.mistEnabled = false;
         this.windEnabled = false;
+        this.cloudsEnabled = true;
         this.windTime = 0;
 
-        this.inventory = { branches: 0, berries: 0, stones: 0, logs: 0, redMushrooms: 0, yellowMushrooms: 0, tools: [] };
+        this.inventory = { branches: 0, berries: 0, stones: 0, logs: 0, meat: 0, leather: 0, redMushrooms: 0, yellowMushrooms: 0, tools: [] };
+        this.nextToolId = 1;
+        this.actionbarSlots = new Array(9).fill(null);
+        this.activeSlotIndex = 0;
+        this.actionbarSlotElements = [];
+        this.droppedItems = [];
         this.focusedItem = null; // { mesh, index, type }
         this.craftingOpen = false;
         this.pigs = [];
@@ -2053,6 +2486,8 @@ class TerrainScene {
 
         this.setupScene();
         this.setupLighting();
+        this.cloudSystem = new VolumetricCloudSystem(this.scene);
+        this.cloudSystem.setEnabled(this.cloudsEnabled);
 
         this.treeGenerator = new TreeGenerator();
         this.treePrototypes = this.treeGenerator.generateTreePrototypes(5); // Generate 5 variations
@@ -2073,6 +2508,9 @@ class TerrainScene {
         this.splashSystem = new SplashSystem(this.scene);
         this.rainEffect.setSplashSystem(this.splashSystem);
 
+        this.meatDropMaterial = new THREE.MeshStandardMaterial({ color: 0xb04132, roughness: 0.8, flatShading: true });
+        this.leatherDropMaterial = new THREE.MeshStandardMaterial({ color: 0x8d6e63, roughness: 0.95, flatShading: true });
+
         this.setupControls();
         this.setupUI();
         this.createViewmodel();
@@ -2080,6 +2518,7 @@ class TerrainScene {
         this.spawnRabbits();
         this.animate();
         this.setupCraftingListeners();
+        this.updateInventoryUI();
 
         // Hide loading screen
         setTimeout(() => {
@@ -2185,6 +2624,30 @@ class TerrainScene {
         this.scene.add(hemisphereLight);
     }
 
+    getTerrainHeightAtPosition(x, z) {
+        const fallback = this.generator.getElevation(x, z);
+        const half = this.chunkSize * 0.5;
+        const baseX = Math.floor((x + half) / this.chunkSize) * this.chunkSize;
+        const baseZ = Math.floor((z + half) / this.chunkSize) * this.chunkSize;
+
+        let chunk = this.chunks.get(`${baseX},${baseZ}`);
+        let hitY = chunk ? chunk.sampleHeightAtWorld(x, z) : null;
+        if (hitY !== null && hitY !== undefined) return hitY;
+
+        // Edge fallback: try neighboring chunks if primary lookup misses.
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dz = -1; dz <= 1; dz++) {
+                if (dx === 0 && dz === 0) continue;
+                chunk = this.chunks.get(`${baseX + dx * this.chunkSize},${baseZ + dz * this.chunkSize}`);
+                if (!chunk) continue;
+                hitY = chunk.sampleHeightAtWorld(x, z);
+                if (hitY !== null && hitY !== undefined) return hitY;
+            }
+        }
+
+        return fallback;
+    }
+
     updateChunks() {
         const cx = Math.floor(this.camera.position.x / this.chunkSize) * this.chunkSize;
         const cz = Math.floor(this.camera.position.z / this.chunkSize) * this.chunkSize;
@@ -2256,6 +2719,12 @@ class TerrainScene {
             if (e.code === 'KeyC') {
                 this.toggleCrafting();
             }
+            if (e.code.startsWith('Digit') || e.code.startsWith('Numpad')) {
+                const slot = parseInt(e.code.replace('Digit', '').replace('Numpad', ''), 10);
+                if (slot >= 1 && slot <= 9) {
+                    this.activateActionbarSlot(slot - 1);
+                }
+            }
             if (e.code === 'KeyR' && this.placementMode) {
                 if (this.placementMode === 'tri_wall') {
                     this.placementFlipped = !this.placementFlipped;
@@ -2286,70 +2755,87 @@ class TerrainScene {
         const { mesh, index } = this.focusedItem;
         if (!mesh) return;
 
-        const matrix = new THREE.Matrix4();
         let picked = false;
         let itemName = "";
 
-        if (mesh.userData.isBranch) {
-            mesh.getMatrixAt(index, matrix);
-            matrix.scale(new THREE.Vector3(0, 0, 0));
-            mesh.setMatrixAt(index, matrix);
-            mesh.instanceMatrix.needsUpdate = true;
-            this.inventory.branches++;
+        if (mesh.userData.isDrop) {
+            if (mesh.userData.dropType === 'meat') {
+                this.inventory.meat++;
+                itemName = "Raw Meat";
+            } else if (mesh.userData.dropType === 'leather') {
+                this.inventory.leather++;
+                itemName = "Leather";
+            }
+
+            this.scene.remove(mesh);
+            this.droppedItems = this.droppedItems.filter(item => item !== mesh);
+
+            if (mesh.geometry) mesh.geometry.dispose();
             picked = true;
-            itemName = "Branch";
-        } else if (mesh.userData.isBush) {
-            const berryMesh = mesh.userData.berryMesh;
-            if (berryMesh) {
-                berryMesh.getMatrixAt(index, matrix);
-                // Check if already 0
-                const s = new THREE.Vector3();
-                matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
-                if (s.length() > 0.001) {
-                    matrix.scale(new THREE.Vector3(0, 0, 0));
-                    berryMesh.setMatrixAt(index, matrix);
-                    berryMesh.instanceMatrix.needsUpdate = true;
-                    this.inventory.berries += 5;
-                    picked = true;
-                    itemName = "Berries";
+        } else {
+            const matrix = new THREE.Matrix4();
+
+            if (mesh.userData.isBranch) {
+                mesh.getMatrixAt(index, matrix);
+                matrix.scale(new THREE.Vector3(0, 0, 0));
+                mesh.setMatrixAt(index, matrix);
+                mesh.instanceMatrix.needsUpdate = true;
+                this.inventory.branches++;
+                picked = true;
+                itemName = "Branch";
+            } else if (mesh.userData.isBush) {
+                const berryMesh = mesh.userData.berryMesh;
+                if (berryMesh) {
+                    berryMesh.getMatrixAt(index, matrix);
+                    // Check if already 0
+                    const s = new THREE.Vector3();
+                    matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+                    if (s.length() > 0.001) {
+                        matrix.scale(new THREE.Vector3(0, 0, 0));
+                        berryMesh.setMatrixAt(index, matrix);
+                        berryMesh.instanceMatrix.needsUpdate = true;
+                        this.inventory.berries += 5;
+                        picked = true;
+                        itemName = "Berries";
+                    }
                 }
-            }
-        } else if (mesh.userData.isStone) {
-            mesh.getMatrixAt(index, matrix);
-            matrix.scale(new THREE.Vector3(0, 0, 0));
-            mesh.setMatrixAt(index, matrix);
-            mesh.instanceMatrix.needsUpdate = true;
-            this.inventory.stones++;
-            picked = true;
-            itemName = "Stone";
-        } else if (mesh.userData.isLog) {
-            mesh.getMatrixAt(index, matrix);
-            matrix.scale(new THREE.Vector3(0, 0, 0));
-            mesh.setMatrixAt(index, matrix);
-            mesh.instanceMatrix.needsUpdate = true;
-            this.inventory.logs++;
-            picked = true;
-            itemName = "Log";
-        } else if (mesh.userData.isMushroom) {
-            mesh.getMatrixAt(index, matrix);
-            matrix.scale(new THREE.Vector3(0, 0, 0));
-            mesh.setMatrixAt(index, matrix);
-            mesh.instanceMatrix.needsUpdate = true;
+            } else if (mesh.userData.isStone) {
+                mesh.getMatrixAt(index, matrix);
+                matrix.scale(new THREE.Vector3(0, 0, 0));
+                mesh.setMatrixAt(index, matrix);
+                mesh.instanceMatrix.needsUpdate = true;
+                this.inventory.stones++;
+                picked = true;
+                itemName = "Stone";
+            } else if (mesh.userData.isLog) {
+                mesh.getMatrixAt(index, matrix);
+                matrix.scale(new THREE.Vector3(0, 0, 0));
+                mesh.setMatrixAt(index, matrix);
+                mesh.instanceMatrix.needsUpdate = true;
+                this.inventory.logs++;
+                picked = true;
+                itemName = "Log";
+            } else if (mesh.userData.isMushroom) {
+                mesh.getMatrixAt(index, matrix);
+                matrix.scale(new THREE.Vector3(0, 0, 0));
+                mesh.setMatrixAt(index, matrix);
+                mesh.instanceMatrix.needsUpdate = true;
 
-            const capMesh = mesh.userData.capMesh;
-            if (capMesh) {
-                capMesh.setMatrixAt(index, matrix);
-                capMesh.instanceMatrix.needsUpdate = true;
-            }
+                const capMesh = mesh.userData.capMesh;
+                if (capMesh) {
+                    capMesh.setMatrixAt(index, matrix);
+                    capMesh.instanceMatrix.needsUpdate = true;
+                }
 
-            if (mesh.userData.mushroomType === 'red') {
-                this.inventory.redMushrooms++;
-                itemName = "Red Mushroom";
-            } else {
-                this.inventory.yellowMushrooms++;
-                itemName = "Yellow Mushroom";
+                if (mesh.userData.mushroomType === 'red') {
+                    this.inventory.redMushrooms++;
+                    itemName = "Red Mushroom";
+                } else {
+                    this.inventory.yellowMushrooms++;
+                    itemName = "Yellow Mushroom";
+                }
+                picked = true;
             }
-            picked = true;
         }
 
         if (picked) {
@@ -2367,7 +2853,7 @@ class TerrainScene {
             const z = (Math.random() - 0.5) * 600;
             const h = this.generator.getElevation(x, z);
             if (h > CONFIG.terrain.waterLevel + 2) {
-                const pig = new Pig(this.scene, this.generator, new THREE.Vector3(x, h, z));
+                const pig = new Pig(this.scene, this.generator, new THREE.Vector3(x, h, z), this);
                 this.pigs.push(pig);
             }
         }
@@ -2379,10 +2865,360 @@ class TerrainScene {
             const z = (Math.random() - 0.5) * 800;
             const h = this.generator.getElevation(x, z);
             if (h > CONFIG.terrain.waterLevel + 1) {
-                const rabbit = new Rabbit(this.scene, this.generator, new THREE.Vector3(x, h, z));
+                const rabbit = new Rabbit(this.scene, this.generator, new THREE.Vector3(x, h, z), this);
                 this.rabbits.push(rabbit);
             }
         }
+    }
+
+    getToolById(toolId) {
+        return this.inventory.tools.find(t => t.id === toolId) || null;
+    }
+
+    getActiveTool() {
+        const toolId = this.actionbarSlots[this.activeSlotIndex];
+        if (toolId === null || toolId === undefined) return null;
+        return this.getToolById(toolId);
+    }
+
+    isChopTool(tool) {
+        return !!tool && tool.type === 'Stone Axe';
+    }
+
+    getToolShortName(type) {
+        if (type === 'Stone Axe') return 'Axe';
+        if (type === 'Stone Club') return 'Club';
+        return type;
+    }
+
+    activateActionbarSlot(index) {
+        if (index < 0 || index >= this.actionbarSlots.length) return;
+        this.activeSlotIndex = index;
+        this.updateActionbarUI();
+        this.updateViewmodel();
+    }
+
+    addToolToInventory(type, durability) {
+        const tool = { id: this.nextToolId++, type, durability };
+        this.inventory.tools.push(tool);
+
+        const emptySlot = this.actionbarSlots.findIndex(slot => slot === null);
+        if (emptySlot !== -1) {
+            this.actionbarSlots[emptySlot] = tool.id;
+            if (!this.getActiveTool()) {
+                this.activeSlotIndex = emptySlot;
+            }
+        }
+
+        return tool;
+    }
+
+    removeToolById(toolId) {
+        this.inventory.tools = this.inventory.tools.filter(t => t.id !== toolId);
+        for (let i = 0; i < this.actionbarSlots.length; i++) {
+            if (this.actionbarSlots[i] === toolId) {
+                this.actionbarSlots[i] = null;
+            }
+        }
+    }
+
+    setupActionbar() {
+        if (document.getElementById('actionbar')) {
+            this.updateActionbarUI();
+            return;
+        }
+
+        const bar = document.createElement('div');
+        bar.id = 'actionbar';
+        bar.style.position = 'fixed';
+        bar.style.left = '50%';
+        bar.style.bottom = '20px';
+        bar.style.transform = 'translateX(-50%)';
+        bar.style.display = 'grid';
+        bar.style.gridTemplateColumns = 'repeat(9, 76px)';
+        bar.style.gap = '6px';
+        bar.style.zIndex = '1200';
+        bar.style.pointerEvents = 'auto';
+
+        this.actionbarSlotElements = [];
+        for (let i = 0; i < 9; i++) {
+            const slot = document.createElement('div');
+            slot.dataset.slot = String(i);
+            slot.style.width = '76px';
+            slot.style.height = '64px';
+            slot.style.border = '2px solid rgba(255,255,255,0.35)';
+            slot.style.borderRadius = '8px';
+            slot.style.background = 'rgba(0,0,0,0.55)';
+            slot.style.backdropFilter = 'blur(6px)';
+            slot.style.position = 'relative';
+            slot.style.userSelect = 'none';
+            slot.style.cursor = 'pointer';
+
+            slot.addEventListener('mousedown', (e) => e.stopPropagation());
+            slot.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.activateActionbarSlot(i);
+            });
+
+            slot.draggable = true;
+            slot.addEventListener('dragstart', (e) => {
+                if (this.actionbarSlots[i] === null) {
+                    e.preventDefault();
+                    return;
+                }
+                if (e.dataTransfer) {
+                    e.dataTransfer.setData('text/plain', String(i));
+                    e.dataTransfer.effectAllowed = 'move';
+                }
+                slot.style.opacity = '0.55';
+            });
+            slot.addEventListener('dragend', () => {
+                slot.style.opacity = '1';
+                this.actionbarSlotElements.forEach(el => { el.style.outline = ''; });
+            });
+            slot.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                slot.style.outline = '2px solid rgba(255,255,255,0.7)';
+            });
+            slot.addEventListener('dragleave', () => {
+                slot.style.outline = '';
+            });
+            slot.addEventListener('drop', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                slot.style.outline = '';
+
+                const fromIndex = parseInt(e.dataTransfer?.getData('text/plain') ?? '', 10);
+                if (Number.isNaN(fromIndex) || fromIndex < 0 || fromIndex > 8 || fromIndex === i) return;
+
+                const tmp = this.actionbarSlots[fromIndex];
+                this.actionbarSlots[fromIndex] = this.actionbarSlots[i];
+                this.actionbarSlots[i] = tmp;
+
+                if (this.activeSlotIndex === fromIndex) this.activeSlotIndex = i;
+                else if (this.activeSlotIndex === i) this.activeSlotIndex = fromIndex;
+
+                this.updateActionbarUI();
+                this.updateViewmodel();
+            });
+
+            bar.appendChild(slot);
+            this.actionbarSlotElements.push(slot);
+        }
+
+        document.body.appendChild(bar);
+        this.updateActionbarUI();
+    }
+
+    updateActionbarUI() {
+        if (!this.actionbarSlotElements || this.actionbarSlotElements.length === 0) return;
+
+        const validIds = new Set(this.inventory.tools.map(t => t.id));
+        for (let i = 0; i < this.actionbarSlots.length; i++) {
+            const toolId = this.actionbarSlots[i];
+            if (toolId !== null && !validIds.has(toolId)) {
+                this.actionbarSlots[i] = null;
+            }
+        }
+
+        for (let i = 0; i < this.actionbarSlotElements.length; i++) {
+            const slot = this.actionbarSlotElements[i];
+            const tool = this.getToolById(this.actionbarSlots[i]);
+            const selected = i === this.activeSlotIndex;
+
+            slot.style.border = selected ? '2px solid #ffd54f' : '2px solid rgba(255,255,255,0.35)';
+            slot.style.boxShadow = selected ? '0 0 10px rgba(255,213,79,0.6)' : 'none';
+            slot.innerHTML = '';
+
+            const hotkey = document.createElement('div');
+            hotkey.textContent = String(i + 1);
+            hotkey.style.position = 'absolute';
+            hotkey.style.top = '3px';
+            hotkey.style.left = '6px';
+            hotkey.style.fontSize = '11px';
+            hotkey.style.color = 'rgba(255,255,255,0.85)';
+            hotkey.style.fontFamily = 'monospace';
+            slot.appendChild(hotkey);
+
+            if (tool) {
+                const label = document.createElement('div');
+                label.textContent = this.getToolShortName(tool.type);
+                label.style.position = 'absolute';
+                label.style.left = '50%';
+                label.style.top = '22px';
+                label.style.transform = 'translateX(-50%)';
+                label.style.fontSize = '12px';
+                label.style.fontWeight = '600';
+                label.style.color = 'white';
+                label.style.whiteSpace = 'nowrap';
+                slot.appendChild(label);
+
+                const durability = document.createElement('div');
+                durability.textContent = `${Math.max(0, Math.round(tool.durability))}%`;
+                durability.style.position = 'absolute';
+                durability.style.left = '50%';
+                durability.style.bottom = '5px';
+                durability.style.transform = 'translateX(-50%)';
+                durability.style.fontSize = '11px';
+                durability.style.color = 'rgba(255,255,255,0.9)';
+                slot.appendChild(durability);
+            }
+        }
+    }
+
+    onPigKilled(pig, deathPos) {
+        const idx = this.pigs.indexOf(pig);
+        if (idx !== -1) {
+            this.pigs.splice(idx, 1);
+        }
+
+        this.spawnPigDrops(deathPos);
+        pig.dispose();
+    }
+
+    spawnPigDrops(centerPos) {
+        const meatCount = 1 + Math.floor(Math.random() * 3);
+        const leatherCount = 1;
+        const total = meatCount + leatherCount;
+
+        for (let i = 0; i < total; i++) {
+            const isLeather = i >= meatCount;
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 1.0 + Math.random() * 2.5;
+            const x = centerPos.x + Math.cos(angle) * dist;
+            const z = centerPos.z + Math.sin(angle) * dist;
+            const y = this.generator.getElevation(x, z) + 3.0 + Math.random() * 1.5;
+            this.spawnDropItem(isLeather ? 'leather' : 'meat', new THREE.Vector3(x, y, z));
+        }
+    }
+
+    spawnDropItem(type, pos) {
+        // 50% larger drops than the original request baseline.
+        const mesh = type === 'leather'
+            ? new THREE.Mesh(new THREE.BoxGeometry(0.825, 0.12, 0.6), this.leatherDropMaterial)
+            : new THREE.Mesh(new THREE.BoxGeometry(0.57, 0.42, 0.42), this.meatDropMaterial);
+
+        mesh.position.copy(pos);
+        mesh.rotation.y = Math.random() * Math.PI * 2;
+        if (type === 'leather') {
+            // Keep leather flat so corners cannot clip through terrain.
+            mesh.rotation.x = 0;
+            mesh.rotation.z = 0;
+        }
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+
+        mesh.userData.isDrop = true;
+        mesh.userData.dropType = type;
+        mesh.userData.pickupName = type === 'leather' ? 'Leather' : 'Raw Meat';
+        mesh.userData.dropHalfSize = type === 'leather'
+            ? new THREE.Vector3(0.4125, 0.06, 0.3)
+            : new THREE.Vector3(0.285, 0.21, 0.21);
+        mesh.userData.dropVelY = 0;
+        mesh.userData.dropGrounded = false;
+
+        const supportY = this.getDropSupportY(mesh);
+        if (mesh.position.y < supportY + 1.5) {
+            mesh.position.y = supportY + 1.5;
+        }
+
+        this.scene.add(mesh);
+        this.droppedItems.push(mesh);
+    }
+
+    getDropSupportY(mesh) {
+        if (!mesh) return 0;
+        const half = mesh.userData.dropHalfSize;
+        if (!half) {
+            const groundY = this.generator.getElevation(mesh.position.x, mesh.position.z);
+            return groundY + 0.2;
+        }
+
+        const c = Math.cos(mesh.rotation.y);
+        const s = Math.sin(mesh.rotation.y);
+        let maxGround = -Infinity;
+        const probeHalfX = half.x + 0.08;
+        const probeHalfZ = half.z + 0.08;
+
+        // Probe dense footprint grid and sit above the highest sampled ground.
+        for (let ix = -3; ix <= 3; ix++) {
+            for (let iz = -3; iz <= 3; iz++) {
+                const ox = (ix / 3) * probeHalfX;
+                const oz = (iz / 3) * probeHalfZ;
+                // Use the same Y-axis rotation orientation as three.js applyAxisAngle.
+                const wx = mesh.position.x + ox * c + oz * s;
+                const wz = mesh.position.z - ox * s + oz * c;
+                const gh = this.generator.getElevation(wx, wz);
+                if (gh > maxGround) maxGround = gh;
+            }
+        }
+
+        const safetyMargin = 0.12;
+        return maxGround + half.y + safetyMargin;
+    }
+
+    keepDropAboveGround(mesh) {
+        if (!mesh) return;
+        mesh.position.y = this.getDropSupportY(mesh);
+    }
+
+    updateDroppedItemsPhysics(delta) {
+        const gravity = -18.0;
+        for (const mesh of this.droppedItems) {
+            if (!mesh.userData.dropGrounded) {
+                mesh.userData.dropVelY += gravity * delta;
+                mesh.position.y += mesh.userData.dropVelY * delta;
+            }
+
+            const supportY = this.getDropSupportY(mesh);
+            if (mesh.position.y <= supportY) {
+                mesh.position.y = supportY;
+                mesh.userData.dropVelY = 0;
+                mesh.userData.dropGrounded = true;
+            }
+        }
+    }
+
+    tryHitPig(tool) {
+        const meleeRange = 14;
+        const forward = new THREE.Vector3();
+        this.camera.getWorldDirection(forward);
+
+        let bestPig = null;
+        let bestDist = Infinity;
+        const toPig = new THREE.Vector3();
+
+        for (const pig of this.pigs) {
+            if (!pig || pig.dead) continue;
+
+            toPig.copy(pig.group.position).sub(this.camera.position);
+            const dist = toPig.length();
+            if (dist > meleeRange) continue;
+
+            const dir = toPig.clone().normalize();
+            const dot = dir.dot(forward);
+            if (dot < 0.45) continue;
+
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestPig = pig;
+            }
+        }
+
+        if (!bestPig) return;
+
+        bestPig.takeDamage(3);
+        this.showPickupFeedback(bestPig.hp > 0 ? `Pig Hit (${bestPig.hp}/10)` : 'Pig Down!');
+    }
+
+    consumeToolDurability(tool, amount = 1) {
+        if (!tool) return;
+        tool.durability -= amount;
+        if (tool.durability <= 0) {
+            this.removeToolById(tool.id);
+            this.showPickupFeedback(tool.type === 'Stone Club' ? "Club Broke!" : "Axe Broke!");
+        }
+        this.updateInventoryUI();
     }
 
     handleAction() {
@@ -2390,18 +3226,22 @@ class TerrainScene {
             this.placeObject();
             return;
         }
-        const hasAxe = this.inventory.tools.find(t => t.type === 'Stone Axe');
-        if (hasAxe) {
-            this.swingAxe(hasAxe);
+        const activeTool = this.getActiveTool();
+        if (!activeTool) return;
+
+        if (activeTool.type === 'Stone Axe') {
+            this.swingTool(activeTool, this.axeModel, 1.5);
+        } else if (activeTool.type === 'Stone Club') {
+            this.swingTool(activeTool, this.clubModel, 1.35);
         }
     }
 
-    swingAxe(axe) {
-        if (this.isSwinging) return;
+    swingTool(tool, model, swingAmount) {
+        if (this.isSwinging || !model) return;
         this.isSwinging = true;
 
         // Visual swing
-        const startRot = this.axeModel.rotation.clone();
+        const startRot = model.rotation.clone();
         const swingTime = 0.2;
         const startTime = performance.now();
 
@@ -2411,26 +3251,30 @@ class TerrainScene {
             const t = Math.min(elapsed / swingTime, 1.0);
 
             if (t < 1.0) {
-                this.axeModel.rotation.x = startRot.x + Math.sin(t * Math.PI) * 1.5;
+                model.rotation.x = startRot.x + Math.sin(t * Math.PI) * swingAmount;
                 requestAnimationFrame(animateSwing);
             } else {
-                this.axeModel.rotation.copy(startRot);
+                model.rotation.copy(startRot);
                 this.isSwinging = false;
 
                 // Hit check
-                this.tryChop();
+                this.resolveToolHit(tool);
             }
         };
         animateSwing();
     }
 
-    tryChop() {
-        if (this.focusedItem && this.focusedItem.mesh.userData.isTree) {
-            this.chopTree(this.focusedItem.mesh, this.focusedItem.index);
+    resolveToolHit(tool) {
+        if (tool?.type === 'Stone Club') {
+            this.tryHitPig(tool);
+        } else if (this.isChopTool(tool) && this.focusedItem && this.focusedItem.mesh.userData.isTree) {
+            this.chopTree(this.focusedItem.mesh, this.focusedItem.index, tool);
         }
+
+        this.consumeToolDurability(tool, 1);
     }
 
-    chopTree(mesh, index) {
+    chopTree(mesh, index, toolUsed) {
         let ownerChunk = null;
         for (const chunk of this.chunks.values()) {
             if (chunk.treeWoodMeshes.includes(mesh)) {
@@ -2493,15 +3337,6 @@ class TerrainScene {
             quat: quat.clone()
         });
 
-        const axe = this.inventory.tools.find(t => t.type === 'Stone Axe');
-        if (axe) {
-            axe.durability -= 10;
-            if (axe.durability <= 0) {
-                this.inventory.tools = this.inventory.tools.filter(t => t !== axe);
-                this.showPickupFeedback("Axe Broke!");
-            }
-            this.updateInventoryUI();
-        }
     }
 
     spawnLogsAt(pos, chunk) {
@@ -2613,37 +3448,74 @@ class TerrainScene {
         handle.rotation.z = Math.PI * 0.1;
         axe.add(handle);
 
-        // Head - Sharp curved wedge
+        // Head - sharp wedge, oriented so the blade faces away from the player
         const headShape = new THREE.Shape();
-        headShape.moveTo(-0.1, 0.1);
-        headShape.lineTo(0.1, 0.12);
-        headShape.quadraticCurveTo(0.3, 0, 0.1, -0.12);
-        headShape.lineTo(-0.1, -0.1);
-        headShape.lineTo(-0.1, 0.1);
+        headShape.moveTo(-0.14, 0.12);
+        headShape.lineTo(0.08, 0.14);
+        headShape.lineTo(0.34, 0.0); // acute sharp edge
+        headShape.lineTo(0.08, -0.14);
+        headShape.lineTo(-0.14, -0.12);
+        headShape.lineTo(-0.14, 0.12);
 
-        const extrudeSettings = { depth: 0.15, bevelEnabled: true, bevelThickness: 0.01, bevelSize: 0.01, bevelSegments: 3 };
+        const extrudeSettings = { depth: 0.12, bevelEnabled: true, bevelThickness: 0.006, bevelSize: 0.008, bevelSegments: 2 };
         const headGeo = new THREE.ExtrudeGeometry(headShape, extrudeSettings);
-        headGeo.translate(0, 0, -0.075); // Center extrusion
+        headGeo.translate(0, 0, -0.06); // Center extrusion
 
         const headMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.6, flatShading: true });
         const head = new THREE.Mesh(headGeo, headMat);
         head.position.set(0.1, 0.45, 0);
-        head.rotation.z = -Math.PI * 0.1;
+        head.rotation.y = Math.PI; // flip to point blade away from camera
+        head.rotation.z = -Math.PI * 0.08;
         axe.add(head);
 
         // Positioning in front of camera
         axe.position.set(0.4, -0.5, -0.8);
         axe.rotation.set(0, -Math.PI * 0.5, 0.2);
+        axe.userData.idlePos = axe.position.clone();
 
         this.axeModel = axe;
         this.viewmodelGroup.add(axe);
+
+        // Stone Club Model
+        const club = new THREE.Group();
+
+        const clubHandleGeo = new THREE.CylinderGeometry(0.055, 0.07, 1.2, 8);
+        const clubHandleMat = new THREE.MeshStandardMaterial({ color: 0x6d4c41, roughness: 0.92 });
+        const clubHandle = new THREE.Mesh(clubHandleGeo, clubHandleMat);
+        clubHandle.rotation.z = Math.PI * 0.08;
+        club.add(clubHandle);
+
+        const clubHeadMat = new THREE.MeshStandardMaterial({ color: 0x8a8a8a, roughness: 0.75, flatShading: true });
+        const clubHeadCore = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), clubHeadMat);
+        clubHeadCore.position.set(0.08, 0.48, 0);
+        club.add(clubHeadCore);
+
+        const clubBump1 = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), clubHeadMat);
+        clubBump1.position.set(0.18, 0.52, 0.03);
+        club.add(clubBump1);
+
+        const clubBump2 = new THREE.Mesh(new THREE.SphereGeometry(0.085, 8, 6), clubHeadMat);
+        clubBump2.position.set(0.03, 0.56, -0.08);
+        club.add(clubBump2);
+
+        const clubBump3 = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), clubHeadMat);
+        clubBump3.position.set(0.02, 0.44, 0.09);
+        club.add(clubBump3);
+
+        club.position.set(0.4, -0.5, -0.8);
+        club.rotation.set(0, -Math.PI * 0.5, 0.2);
+        club.userData.idlePos = club.position.clone();
+
+        this.clubModel = club;
+        this.viewmodelGroup.add(club);
         this.updateViewmodel();
     }
 
     updateViewmodel() {
-        if (!this.axeModel) return;
-        const hasAxe = this.inventory.tools.some(t => t.type === 'Stone Axe');
-        this.axeModel.visible = hasAxe;
+        if (!this.axeModel || !this.clubModel) return;
+        const activeTool = this.getActiveTool();
+        this.axeModel.visible = !!activeTool && activeTool.type === 'Stone Axe';
+        this.clubModel.visible = !!activeTool && activeTool.type === 'Stone Club';
     }
 
     toggleCrafting() {
@@ -2660,9 +3532,21 @@ class TerrainScene {
         if (this.inventory.branches >= 1 && this.inventory.stones >= 2) {
             this.inventory.branches -= 1;
             this.inventory.stones -= 2;
-            this.inventory.tools.push({ type: 'Stone Axe', durability: 50 });
+            this.addToolToInventory('Stone Axe', 100);
             this.updateInventoryUI();
             this.showPickupFeedback("Stone Axe");
+        } else {
+            this.showPickupFeedback("Missing Materials!");
+        }
+    }
+
+    craftStoneClub() {
+        if (this.inventory.logs >= 1 && this.inventory.stones >= 1) {
+            this.inventory.logs -= 1;
+            this.inventory.stones -= 1;
+            this.addToolToInventory('Stone Club', 100);
+            this.updateInventoryUI();
+            this.showPickupFeedback("Stone Club");
         } else {
             this.showPickupFeedback("Missing Materials!");
         }
@@ -2684,6 +3568,9 @@ class TerrainScene {
     setupCraftingListeners() {
         const axeBtn = document.getElementById('btn-craft-axe');
         if (axeBtn) axeBtn.onclick = () => this.craftStoneAxe();
+
+        const clubBtn = document.getElementById('btn-craft-club');
+        if (clubBtn) clubBtn.onclick = () => this.craftStoneClub();
 
         const firepitBtn = document.getElementById('btn-craft-firepit');
         if (firepitBtn) firepitBtn.onclick = () => this.craftFirepit();
@@ -2893,6 +3780,8 @@ class TerrainScene {
             Berries: ${this.inventory.berries}<br>
             Stones: ${this.inventory.stones}<br>
             Logs: ${this.inventory.logs}<br>
+            Meat: ${this.inventory.meat}<br>
+            Leather: ${this.inventory.leather}<br>
             Red Mushrooms: ${this.inventory.redMushrooms}<br>
             Yellow Mushrooms: ${this.inventory.yellowMushrooms}`;
 
@@ -2904,6 +3793,7 @@ class TerrainScene {
         }
 
         this.updateViewmodel();
+        this.updateActionbarUI();
     }
 
     updateInteraction() {
@@ -2917,7 +3807,8 @@ class TerrainScene {
 
         // Get all interactable meshes
         const interactables = [];
-        const hasAxe = this.inventory.tools.some(t => t.type === 'Stone Axe');
+        const activeTool = this.getActiveTool();
+        const canChopTrees = this.isChopTool(activeTool);
 
         this.chunks.forEach(chunk => {
             interactables.push(...chunk.branchMeshes);
@@ -2925,10 +3816,11 @@ class TerrainScene {
             interactables.push(...chunk.stoneMeshes);
             interactables.push(...chunk.logMeshes);
             interactables.push(...chunk.mushroomMeshes);
-            if (hasAxe) {
+            if (canChopTrees) {
                 interactables.push(...chunk.treeWoodMeshes);
             }
         });
+        interactables.push(...this.droppedItems);
 
         const intersects = this.raycaster.intersectObjects(interactables);
 
@@ -3073,36 +3965,54 @@ class TerrainScene {
             const mesh = hit.object;
             const index = hit.instanceId;
 
-            // Matrix extraction
-            const matrix = new THREE.Matrix4();
-            mesh.getMatrixAt(index, matrix);
-            const scale = new THREE.Vector3();
-            const pos = new THREE.Vector3();
-            const quat = new THREE.Quaternion();
-            matrix.decompose(pos, quat, scale);
+            if (index !== undefined && typeof mesh.getMatrixAt === 'function') {
+                // Matrix extraction for InstancedMesh
+                const matrix = new THREE.Matrix4();
+                mesh.getMatrixAt(index, matrix);
+                const scale = new THREE.Vector3();
+                const pos = new THREE.Vector3();
+                const quat = new THREE.Quaternion();
+                matrix.decompose(pos, quat, scale);
 
-            if (scale.length() > 0.001) {
-                // For bushes, check if berries are still there
-                if (mesh.userData.isBush) {
-                    const berryMesh = mesh.userData.berryMesh;
-                    const bMatrix = new THREE.Matrix4();
-                    berryMesh.getMatrixAt(index, bMatrix);
-                    const bScale = new THREE.Vector3();
-                    bMatrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), bScale);
-                    if (bScale.length() < 0.001) {
-                        this.highlightMesh.visible = false;
-                        this.focusedItem = null;
-                        return;
+                if (scale.length() > 0.001) {
+                    // For bushes, check if berries are still there
+                    if (mesh.userData.isBush) {
+                        const berryMesh = mesh.userData.berryMesh;
+                        const bMatrix = new THREE.Matrix4();
+                        berryMesh.getMatrixAt(index, bMatrix);
+                        const bScale = new THREE.Vector3();
+                        bMatrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), bScale);
+                        if (bScale.length() < 0.001) {
+                            this.highlightMesh.visible = false;
+                            this.focusedItem = null;
+                            return;
+                        }
                     }
+
+                    this.focusedItem = { mesh, index };
+
+                    // Update highlight mesh to match the instance
+                    this.highlightMesh.geometry = mesh.geometry;
+                    this.highlightMesh.position.copy(pos);
+                    this.highlightMesh.quaternion.copy(quat);
+                    this.highlightMesh.scale.copy(scale).multiplyScalar(1.05);
+                    this.highlightMesh.visible = true;
+                    return;
                 }
+            } else if (mesh.userData.isDrop) {
+                this.focusedItem = { mesh, index: null };
 
-                this.focusedItem = { mesh, index };
+                const pos = new THREE.Vector3();
+                const quat = new THREE.Quaternion();
+                const scale = new THREE.Vector3();
+                mesh.getWorldPosition(pos);
+                mesh.getWorldQuaternion(quat);
+                mesh.getWorldScale(scale);
 
-                // Update highlight mesh to match the instance
                 this.highlightMesh.geometry = mesh.geometry;
                 this.highlightMesh.position.copy(pos);
                 this.highlightMesh.quaternion.copy(quat);
-                this.highlightMesh.scale.copy(scale).multiplyScalar(1.05);
+                this.highlightMesh.scale.copy(scale).multiplyScalar(1.2);
                 this.highlightMesh.visible = true;
                 return;
             }
@@ -3169,8 +4079,12 @@ class TerrainScene {
         // Crafting Button Binding
         const craftBtn = document.getElementById('btn-craft-axe');
         if (craftBtn) {
-            craftBtn.addEventListener('click', () => this.craftStoneAxe());
             craftBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+        }
+
+        const craftClubBtn = document.getElementById('btn-craft-club');
+        if (craftClubBtn) {
+            craftClubBtn.addEventListener('mousedown', (e) => e.stopPropagation());
         }
 
         // Rain Toggle
@@ -3252,6 +4166,32 @@ class TerrainScene {
             document.getElementById('btn-wind').addEventListener('mousedown', (e) => e.stopPropagation());
         }
 
+        // Volumetric Clouds Toggle
+        if (!document.getElementById('btn-clouds')) {
+            const div = document.createElement('div');
+            div.style.marginTop = '10px';
+            div.innerHTML = `<button id="btn-clouds" style="width:100%; padding: 5px; cursor: pointer; background: #f5f5f5;">Disable Clouds</button>`;
+            uiContainer.appendChild(div);
+
+            document.getElementById('btn-clouds').addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.cloudsEnabled = !this.cloudsEnabled;
+                if (this.cloudSystem) {
+                    this.cloudSystem.setEnabled(this.cloudsEnabled);
+                }
+                if (this.cloudsEnabled) {
+                    e.target.textContent = "Disable Clouds";
+                    e.target.style.background = "#f5f5f5";
+                    e.target.style.color = "";
+                } else {
+                    e.target.textContent = "Enable Clouds";
+                    e.target.style.background = "";
+                    e.target.style.color = "";
+                }
+            });
+            document.getElementById('btn-clouds').addEventListener('mousedown', (e) => e.stopPropagation());
+        }
+
         // View Distance Slider
         // Check if already exists to avoid dupes on reload
         if (!document.getElementById('view-dist-slider')) {
@@ -3294,6 +4234,8 @@ class TerrainScene {
             });
             document.getElementById('btn-mode').addEventListener('mousedown', (e) => e.stopPropagation());
         }
+
+        this.setupActionbar();
     }
 
     onWindowResize() {
@@ -3333,26 +4275,39 @@ class TerrainScene {
             this.windUniforms.uWindTime.value = this.windTime;
         }
 
+        if (this.cloudSystem) {
+            this.cloudSystem.update(delta, this.camera.position);
+        }
+
+        this.updateDroppedItemsPhysics(delta);
+
         // Viewmodel Bobbing
-        if (this.axeModel && this.axeModel.visible) {
+        const activeTool = this.getActiveTool();
+        const activeModel = activeTool?.type === 'Stone Axe'
+            ? this.axeModel
+            : (activeTool?.type === 'Stone Club' ? this.clubModel : null);
+        if (activeModel && activeModel.visible) {
             const isMoving = this.controls.velocity.lengthSq() > 0.1;
             const bobSpeed = 10;
             const bobAmount = 0.05;
+            const idlePos = activeModel.userData.idlePos || new THREE.Vector3(0.4, -0.5, -0.8);
 
             if (isMoving) {
-                this.axeModel.position.y = -0.6 + Math.sin(time * 0.01 * bobSpeed) * bobAmount;
-                this.axeModel.position.x = 0.6 + Math.cos(time * 0.01 * (bobSpeed * 0.5)) * (bobAmount * 0.5);
+                activeModel.position.y = idlePos.y + Math.sin(time * 0.01 * bobSpeed) * bobAmount;
+                activeModel.position.x = idlePos.x + Math.cos(time * 0.01 * (bobSpeed * 0.5)) * (bobAmount * 0.5);
             } else {
                 // Return to idle
-                this.axeModel.position.y += (-0.6 - this.axeModel.position.y) * 0.1;
-                this.axeModel.position.x += (0.6 - this.axeModel.position.x) * 0.1;
+                activeModel.position.y += (idlePos.y - activeModel.position.y) * 0.1;
+                activeModel.position.x += (idlePos.x - activeModel.position.x) * 0.1;
             }
         }
 
         this.updateInteraction();
 
         // Update Animals
-        this.pigs.forEach(pig => pig.update(delta, seconds));
+        for (let i = this.pigs.length - 1; i >= 0; i--) {
+            this.pigs[i].update(delta, seconds, this.camera);
+        }
         this.rabbits.forEach(rabbit => rabbit.update(delta, seconds));
         this.firepits.forEach(fp => fp.update(delta));
 
