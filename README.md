@@ -25,8 +25,9 @@ npx serve .
 - `Space`: move up (free-fly) / jump (walk mode)
 - `Left Shift`: move down (free-fly)
 - `Left Ctrl`: sprint
-- `E`: pick up focused item
+- `E`: pick up focused item / interact with firepit
 - `C`: open/close crafting panel
+- `X`: eat the best available food from inventory
 - `Left Click`: use active tool / place building piece
 - `R`: rotate placement piece (`Triangle Wall` flips orientation)
 - `1..9` (or numpad): activate actionbar slot
@@ -38,6 +39,9 @@ npx serve .
 - Volumetric cloud system with slow drifting clouds and UI toggle.
 - Camera mode toggle in UI: `Free-Fly` / `Walk`.
 - Inventory UI with resources, food, materials, mushrooms, and tools.
+- Hunger + stamina survival loop with food-driven recovery and temporary buffs.
+- Firepit cooking UI with single-item and combo food recipes.
+- Food spoilage system with live countdown timers and weighted freshness blending.
 - Bottom-center 9-slot actionbar with drag-and-drop reordering.
 - UI sliders for camera speed and view distance.
 - Live FPS and triangle counters.
@@ -46,6 +50,17 @@ npx serve .
 
 - Gather with `E`: branches, stones, logs, berries, red mushrooms, yellow mushrooms.
 - Loot drops: `Raw Meat`, `Leather`
+
+## Survival and Food
+
+- Hunger drains over time and drains faster while sprinting.
+- Stamina capacity and sprint effectiveness are influenced by current hunger.
+- Better cooked/combo foods restore more hunger/stamina and can grant temporary sprint/regen buffs.
+- Press `X` to consume the best available edible item quickly.
+- Food items spoil over time.
+- Spoilage is tuned to be relatively slow and degrades stacks gradually.
+- Spoilage timers in inventory update live.
+- Picking up fresh perishable food updates stack spoilage using weighted averaging, with a small freshness bonus.
 
 ## Crafting
 
@@ -56,6 +71,18 @@ npx serve .
 - `Wooden Floor`: `2 Logs`
 - `Wooden Roof`: `2 Logs`
 - `Triangle Wall`: `1 Log`
+
+## Firepit Cooking
+
+- Look at a placed `Firepit` and press `E` to open/close the cooking panel.
+- Cooking requires ingredient availability in your inventory.
+- Cooking recipes:
+- `Cooked Meat`: `1 Raw Meat`
+- `Grilled Red Mushroom`: `1 Red Mushroom`
+- `Grilled Yellow Mushroom`: `1 Yellow Mushroom`
+- `Berry-Glazed Cut`: `1 Raw Meat + 2 Berries`
+- `Forest Skewer`: `1 Raw Meat + 1 Red Mushroom + 1 Yellow Mushroom`
+- `Hearty Stew`: `2 Raw Meat + 1 Red Mushroom + 1 Yellow Mushroom + 2 Berries`
 
 ## Tools and Durability
 

@@ -1019,7 +1019,10 @@ class FreeFlyCamera {
     update(delta) {
         if (!this.locked) return;
 
-        const speed = (this.mode === 'walk' ? 15.0 : CONFIG.camera.moveSpeed) * (this.moveState.sprint ? CONFIG.camera.sprintMultiplier : 1);
+        const runtimeSprintMultiplier = typeof this.camera.userData?.sprintMultiplier === 'number'
+            ? this.camera.userData.sprintMultiplier
+            : CONFIG.camera.sprintMultiplier;
+        const speed = (this.mode === 'walk' ? 15.0 : CONFIG.camera.moveSpeed) * (this.moveState.sprint ? runtimeSprintMultiplier : 1);
 
         if (this.mode === 'freefly') {
             this.velocity.set(0, 0, 0);
@@ -2103,6 +2106,7 @@ class Firepit {
         this.scene = scene;
         this.group = new THREE.Group();
         this.group.position.copy(pos);
+        this.interactionMeshes = [];
 
         // Logs in a pile
         const logGeo = new THREE.CylinderGeometry(0.3, 0.3, 2.4, 8);
@@ -2114,6 +2118,7 @@ class Firepit {
             log.rotation.y = (i / 5) * Math.PI * 2;
             log.position.y = 0.3;
             this.group.add(log);
+            this.interactionMeshes.push(log);
         }
 
         // Fire animation
@@ -2122,6 +2127,7 @@ class Firepit {
         this.fire = new THREE.Mesh(fireGeo, fireLightMat);
         this.fire.position.y = 1.35; // Slightly above logs
         this.group.add(this.fire);
+        this.interactionMeshes.push(this.fire);
 
         // Light
         this.light = new THREE.PointLight(0xffa500, 80, 60);
@@ -2130,6 +2136,12 @@ class Firepit {
 
         this.scene.add(this.group);
         this.time = Math.random() * 10;
+
+        // Any hit on firepit meshes can be used to open cooking.
+        this.interactionMeshes.forEach((mesh) => {
+            mesh.userData.isFirepit = true;
+            mesh.userData.firepitRef = this;
+        });
     }
 
     update(delta) {
@@ -2454,7 +2466,125 @@ class TerrainScene {
         this.cloudsEnabled = true;
         this.windTime = 0;
 
-        this.inventory = { branches: 0, berries: 0, stones: 0, logs: 0, meat: 0, leather: 0, redMushrooms: 0, yellowMushrooms: 0, tools: [] };
+        this.inventory = {
+            branches: 0,
+            berries: 0,
+            stones: 0,
+            logs: 0,
+            meat: 0,
+            leather: 0,
+            redMushrooms: 0,
+            yellowMushrooms: 0,
+            cookedMeat: 0,
+            grilledRedMushroom: 0,
+            grilledYellowMushroom: 0,
+            berryGlazedMeat: 0,
+            forestSkewer: 0,
+            heartyStew: 0,
+            tools: []
+        };
+        this.itemLabels = {
+            branches: 'Branches',
+            berries: 'Berries',
+            stones: 'Stones',
+            logs: 'Logs',
+            meat: 'Raw Meat',
+            leather: 'Leather',
+            redMushrooms: 'Red Mushrooms',
+            yellowMushrooms: 'Yellow Mushrooms',
+            cookedMeat: 'Cooked Meat',
+            grilledRedMushroom: 'Grilled Red Mushroom',
+            grilledYellowMushroom: 'Grilled Yellow Mushroom',
+            berryGlazedMeat: 'Berry-Glazed Cut',
+            forestSkewer: 'Forest Skewer',
+            heartyStew: 'Hearty Stew'
+        };
+        this.perishableConfig = {
+            berries: { shelfLife: 720, label: 'Berries' },
+            meat: { shelfLife: 620, label: 'Raw Meat' },
+            redMushrooms: { shelfLife: 700, label: 'Red Mushroom' },
+            yellowMushrooms: { shelfLife: 700, label: 'Yellow Mushroom' },
+            cookedMeat: { shelfLife: 1400, label: 'Cooked Meat' },
+            grilledRedMushroom: { shelfLife: 1300, label: 'Grilled Red Mushroom' },
+            grilledYellowMushroom: { shelfLife: 1300, label: 'Grilled Yellow Mushroom' },
+            berryGlazedMeat: { shelfLife: 1650, label: 'Berry-Glazed Cut' },
+            forestSkewer: { shelfLife: 1750, label: 'Forest Skewer' },
+            heartyStew: { shelfLife: 1950, label: 'Hearty Stew' }
+        };
+        this.perishableItems = {};
+        Object.keys(this.perishableConfig).forEach((item) => {
+            this.perishableItems[item] = [];
+        });
+        this.foodEffects = {
+            berries: { hunger: 6, stamina: 4, sprintBonus: 0.0, regenBonus: 0.0, duration: 0 },
+            cookedMeat: { hunger: 22, stamina: 16, sprintBonus: 0.12, regenBonus: 0.12, duration: 22 },
+            grilledRedMushroom: { hunger: 12, stamina: 10, sprintBonus: 0.0, regenBonus: 0.2, duration: 20 },
+            grilledYellowMushroom: { hunger: 14, stamina: 12, sprintBonus: 0.08, regenBonus: 0.1, duration: 20 },
+            berryGlazedMeat: { hunger: 30, stamina: 24, sprintBonus: 0.22, regenBonus: 0.15, duration: 30 },
+            forestSkewer: { hunger: 34, stamina: 28, sprintBonus: 0.2, regenBonus: 0.22, duration: 34 },
+            heartyStew: { hunger: 45, stamina: 38, sprintBonus: 0.28, regenBonus: 0.35, duration: 45 }
+        };
+        this.cookingRecipes = [
+            {
+                id: 'cooked_meat',
+                name: 'Cooked Meat',
+                description: 'Basic seared meat.',
+                ingredients: { meat: 1 },
+                outputs: { cookedMeat: 1 }
+            },
+            {
+                id: 'grilled_red_mushroom',
+                name: 'Grilled Red Mushroom',
+                description: 'Light cooked mushroom snack.',
+                ingredients: { redMushrooms: 1 },
+                outputs: { grilledRedMushroom: 1 }
+            },
+            {
+                id: 'grilled_yellow_mushroom',
+                name: 'Grilled Yellow Mushroom',
+                description: 'Quick energy boost.',
+                ingredients: { yellowMushrooms: 1 },
+                outputs: { grilledYellowMushroom: 1 }
+            },
+            {
+                id: 'berry_glazed_meat',
+                name: 'Berry-Glazed Cut',
+                description: 'Combo: meat + berries, great sprint boost.',
+                ingredients: { meat: 1, berries: 2 },
+                outputs: { berryGlazedMeat: 1 }
+            },
+            {
+                id: 'forest_skewer',
+                name: 'Forest Skewer',
+                description: 'Combo: meat + red + yellow mushroom.',
+                ingredients: { meat: 1, redMushrooms: 1, yellowMushrooms: 1 },
+                outputs: { forestSkewer: 1 }
+            },
+            {
+                id: 'hearty_stew',
+                name: 'Hearty Stew',
+                description: 'Big combo meal with long buffs.',
+                ingredients: { meat: 2, redMushrooms: 1, yellowMushrooms: 1, berries: 2 },
+                outputs: { heartyStew: 1 }
+            }
+        ];
+        this.playerStats = {
+            hunger: 100,
+            maxHunger: 100,
+            stamina: 100,
+            maxStamina: 100,
+            hungerDrainPerSec: 0.12,
+            sprintBuffTimer: 0,
+            regenBuffTimer: 0,
+            sprintBuffStrength: 0,
+            regenBuffStrength: 0
+        };
+        this.lastSpoilageCheckSec = 0;
+        this.lastInventoryTimerRefreshSec = 0;
+        this.survivalHudRefs = null;
+        this.cookingPanel = null;
+        this.cookingOpen = false;
+        this.activeCookingFirepit = null;
         this.nextToolId = 1;
         this.actionbarSlots = new Array(9).fill(null);
         this.activeSlotIndex = 0;
@@ -2486,6 +2616,7 @@ class TerrainScene {
 
         this.setupScene();
         this.setupLighting();
+        this.camera.userData.sprintMultiplier = CONFIG.camera.sprintMultiplier;
         this.cloudSystem = new VolumetricCloudSystem(this.scene);
         this.cloudSystem.setEnabled(this.cloudsEnabled);
 
@@ -2713,11 +2844,19 @@ class TerrainScene {
         this.controls = new FreeFlyCamera(this.camera, this.renderer.domElement, this.generator);
 
         window.addEventListener('keydown', (e) => {
-            if (e.code === 'KeyE' && this.focusedItem) {
-                this.pickupItem();
+            if (e.code === 'KeyE') {
+                if (this.focusedItem) {
+                    this.interactWithFocusedItem();
+                } else if (this.cookingOpen) {
+                    this.toggleCooking();
+                }
             }
             if (e.code === 'KeyC') {
+                if (this.cookingOpen) this.toggleCooking();
                 this.toggleCrafting();
+            }
+            if (e.code === 'KeyX') {
+                this.consumeBestFood();
             }
             if (e.code.startsWith('Digit') || e.code.startsWith('Numpad')) {
                 const slot = parseInt(e.code.replace('Digit', '').replace('Numpad', ''), 10);
@@ -2735,7 +2874,7 @@ class TerrainScene {
         });
 
         window.addEventListener('mousedown', (e) => {
-            if (e.button === 0 && this.controls.locked && !this.craftingOpen) {
+            if (e.button === 0 && this.controls.locked && !this.craftingOpen && !this.cookingOpen) {
                 this.handleAction();
             }
         });
@@ -2747,8 +2886,18 @@ class TerrainScene {
         // Highlight mesh (yellow outline)
         const highlightMat = new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true, transparent: true, opacity: 0.5 });
         this.highlightMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), highlightMat);
+        this.firepitHighlightGeometry = new THREE.CylinderGeometry(2.2, 2.2, 3.0, 14, 1, true);
         this.highlightMesh.visible = false;
         this.scene.add(this.highlightMesh);
+    }
+
+    interactWithFocusedItem() {
+        if (!this.focusedItem) return;
+        if (this.focusedItem.type === 'firepit') {
+            this.toggleCooking(this.focusedItem.firepit || null);
+            return;
+        }
+        this.pickupItem();
     }
 
     pickupItem() {
@@ -2760,7 +2909,7 @@ class TerrainScene {
 
         if (mesh.userData.isDrop) {
             if (mesh.userData.dropType === 'meat') {
-                this.inventory.meat++;
+                this.addInventoryItem('meat', 1);
                 itemName = "Raw Meat";
             } else if (mesh.userData.dropType === 'leather') {
                 this.inventory.leather++;
@@ -2794,7 +2943,7 @@ class TerrainScene {
                         matrix.scale(new THREE.Vector3(0, 0, 0));
                         berryMesh.setMatrixAt(index, matrix);
                         berryMesh.instanceMatrix.needsUpdate = true;
-                        this.inventory.berries += 5;
+                        this.addInventoryItem('berries', 5);
                         picked = true;
                         itemName = "Berries";
                     }
@@ -2828,10 +2977,10 @@ class TerrainScene {
                 }
 
                 if (mesh.userData.mushroomType === 'red') {
-                    this.inventory.redMushrooms++;
+                    this.addInventoryItem('redMushrooms', 1);
                     itemName = "Red Mushroom";
                 } else {
-                    this.inventory.yellowMushrooms++;
+                    this.addInventoryItem('yellowMushrooms', 1);
                     itemName = "Yellow Mushroom";
                 }
                 picked = true;
@@ -3222,6 +3371,7 @@ class TerrainScene {
     }
 
     handleAction() {
+        if (this.cookingOpen) return;
         if (this.placementMode) {
             this.placeObject();
             return;
@@ -3409,7 +3559,7 @@ class TerrainScene {
         runSmash();
     }
 
-    showPickupFeedback(name) {
+    showPickupFeedback(name, rawText = false) {
         let feedback = document.getElementById('pickup-feedback');
         if (!feedback) {
             feedback = document.createElement('div');
@@ -3426,7 +3576,7 @@ class TerrainScene {
             feedback.style.transition = 'opacity 0.3s';
             document.body.appendChild(feedback);
         }
-        feedback.textContent = `Picked up: ${name}`;
+        feedback.textContent = rawText ? name : `Picked up: ${name}`;
         feedback.style.opacity = '1';
         clearTimeout(this.feedbackTimeout);
         this.feedbackTimeout = setTimeout(() => {
@@ -3765,6 +3915,469 @@ class TerrainScene {
         }
     }
 
+    getItemLabel(itemKey) {
+        return this.itemLabels[itemKey] || itemKey;
+    }
+
+    formatDuration(seconds) {
+        const clamped = Math.max(0, seconds);
+        if (clamped < 60) {
+            return `${clamped.toFixed(1)}s`;
+        }
+        const mins = Math.floor(clamped / 60);
+        const secs = Math.floor(clamped % 60);
+        return `${mins}m ${secs}s`;
+    }
+
+    addInventoryItem(itemKey, amount = 1, shelfLifeOverride = null) {
+        if (!(itemKey in this.inventory)) this.inventory[itemKey] = 0;
+        const bucket = this.perishableItems[itemKey];
+        const currentCount = this.inventory[itemKey];
+        if (bucket && amount > 0) {
+            const nowSec = performance.now() * 0.001;
+            const shelfLife = shelfLifeOverride ?? this.perishableConfig[itemKey].shelfLife;
+            let totalRemaining = 0;
+            for (let i = 0; i < bucket.length; i++) {
+                totalRemaining += Math.max(0, bucket[i] - nowSec);
+            }
+            const totalCount = currentCount + amount;
+            const weightedRemaining = totalCount > 0
+                ? ((totalRemaining + shelfLife * amount) / totalCount)
+                : shelfLife;
+
+            // Fresh pickups slightly improve the blended timer after weighted averaging.
+            const freshnessBonus = shelfLife * 0.04 * (amount / Math.max(1, totalCount));
+            const targetRemaining = Math.max(2, Math.min(shelfLife, weightedRemaining + freshnessBonus));
+
+            bucket.length = 0;
+            const step = Math.min(1.8, Math.max(0.25, targetRemaining / Math.max(18, totalCount * 10)));
+            for (let i = 0; i < totalCount; i++) {
+                const centered = i - (totalCount - 1) * 0.5;
+                bucket.push(nowSec + targetRemaining + centered * step);
+            }
+
+            bucket.sort((a, b) => a - b);
+            for (let i = 0; i < bucket.length; i++) {
+                const minAllowed = nowSec + 1 + i * 0.05;
+                if (bucket[i] < minAllowed) bucket[i] = minAllowed;
+            }
+            bucket.sort((a, b) => a - b);
+        }
+        this.inventory[itemKey] += amount;
+    }
+
+    consumeInventoryItem(itemKey, amount = 1) {
+        const current = this.inventory[itemKey] || 0;
+        if (current < amount) return false;
+
+        this.inventory[itemKey] = current - amount;
+        const bucket = this.perishableItems[itemKey];
+        if (bucket) {
+            bucket.sort((a, b) => a - b);
+            bucket.splice(0, Math.min(amount, bucket.length));
+        }
+
+        return true;
+    }
+
+    hasIngredients(ingredients) {
+        for (const [itemKey, amount] of Object.entries(ingredients)) {
+            if ((this.inventory[itemKey] || 0) < amount) return false;
+        }
+        return true;
+    }
+
+    consumeIngredients(ingredients) {
+        if (!this.hasIngredients(ingredients)) return false;
+        for (const [itemKey, amount] of Object.entries(ingredients)) {
+            this.consumeInventoryItem(itemKey, amount);
+        }
+        return true;
+    }
+
+    addRecipeOutputs(outputs) {
+        for (const [itemKey, amount] of Object.entries(outputs)) {
+            this.addInventoryItem(itemKey, amount);
+        }
+    }
+
+    getSpoilageHint(itemKey) {
+        const bucket = this.perishableItems[itemKey];
+        if (!bucket || bucket.length === 0 || (this.inventory[itemKey] || 0) <= 0) return '';
+        bucket.sort((a, b) => a - b);
+        const nowSec = performance.now() * 0.001;
+        const timeLeft = Math.max(0, bucket[0] - nowSec);
+        return ` (spoils in ${this.formatDuration(timeLeft)})`;
+    }
+
+    setupSurvivalUI() {
+        const infoPanel = document.getElementById('info-panel');
+        if (!infoPanel) return;
+
+        let panel = document.getElementById('survival-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'survival-panel';
+            panel.style.marginTop = '12px';
+            panel.style.paddingTop = '10px';
+            panel.style.borderTop = '1px solid rgba(255,255,255,0.2)';
+
+            panel.innerHTML = `
+                <strong>Survival</strong>
+                <div style="margin-top:6px; font-size:12px;">Hunger <span id="hunger-value">100%</span></div>
+                <div style="height:8px; background:rgba(0,0,0,0.45); border-radius:6px; overflow:hidden; margin-top:3px;">
+                    <div id="hunger-fill" style="height:100%; width:100%; background:#ffb74d;"></div>
+                </div>
+                <div style="margin-top:8px; font-size:12px;">Stamina <span id="stamina-value">100%</span></div>
+                <div style="height:8px; background:rgba(0,0,0,0.45); border-radius:6px; overflow:hidden; margin-top:3px;">
+                    <div id="stamina-fill" style="height:100%; width:100%; background:#64b5f6;"></div>
+                </div>
+                <div id="survival-buffs" style="margin-top:8px; font-size:11px; opacity:0.9;">Buffs: none</div>
+                <div style="margin-top:4px; font-size:11px; opacity:0.7;">Press <span class="key">X</span> to eat best food</div>
+            `;
+            infoPanel.appendChild(panel);
+        }
+
+        this.survivalHudRefs = {
+            hungerValue: document.getElementById('hunger-value'),
+            hungerFill: document.getElementById('hunger-fill'),
+            staminaValue: document.getElementById('stamina-value'),
+            staminaFill: document.getElementById('stamina-fill'),
+            buffs: document.getElementById('survival-buffs')
+        };
+    }
+
+    updateSurvivalUI() {
+        if (!this.survivalHudRefs) return;
+        const stats = this.playerStats;
+        const hungerRatio = THREE.MathUtils.clamp(stats.hunger / stats.maxHunger, 0, 1);
+        const staminaRatio = THREE.MathUtils.clamp(stats.stamina / stats.maxStamina, 0, 1);
+
+        if (this.survivalHudRefs.hungerValue) {
+            this.survivalHudRefs.hungerValue.textContent = `${Math.round(hungerRatio * 100)}%`;
+        }
+        if (this.survivalHudRefs.staminaValue) {
+            this.survivalHudRefs.staminaValue.textContent = `${Math.round(staminaRatio * 100)}%`;
+        }
+        if (this.survivalHudRefs.hungerFill) {
+            this.survivalHudRefs.hungerFill.style.width = `${(hungerRatio * 100).toFixed(1)}%`;
+        }
+        if (this.survivalHudRefs.staminaFill) {
+            this.survivalHudRefs.staminaFill.style.width = `${(staminaRatio * 100).toFixed(1)}%`;
+        }
+
+        const buffs = [];
+        if (stats.sprintBuffTimer > 0) {
+            buffs.push(`Sprint +${Math.round(stats.sprintBuffStrength * 100)}% (${Math.ceil(stats.sprintBuffTimer)}s)`);
+        }
+        if (stats.regenBuffTimer > 0) {
+            buffs.push(`Regen +${Math.round(stats.regenBuffStrength * 100)}% (${Math.ceil(stats.regenBuffTimer)}s)`);
+        }
+        if (this.survivalHudRefs.buffs) {
+            this.survivalHudRefs.buffs.textContent = buffs.length > 0 ? `Buffs: ${buffs.join(', ')}` : 'Buffs: none';
+        }
+    }
+
+    setupCookingPanel() {
+        let panel = document.getElementById('cooking-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'cooking-panel';
+            panel.style.display = 'none';
+            panel.style.position = 'absolute';
+            panel.style.top = '50%';
+            panel.style.left = '50%';
+            panel.style.transform = 'translate(-50%, -50%)';
+            panel.style.background = 'rgba(0,0,0,0.88)';
+            panel.style.color = 'white';
+            panel.style.padding = '24px';
+            panel.style.borderRadius = '12px';
+            panel.style.border = '1px solid #ff9800';
+            panel.style.backdropFilter = 'blur(10px)';
+            panel.style.maxWidth = '560px';
+            panel.style.width = 'min(90vw, 560px)';
+            panel.style.maxHeight = '70vh';
+            panel.style.overflowY = 'auto';
+            panel.style.zIndex = '1300';
+            panel.style.pointerEvents = 'auto';
+            panel.innerHTML = `
+                <h2 style="margin:0 0 8px 0; color:#ffb74d;">Firepit Cooking</h2>
+                <div id="cooking-target" style="font-size:12px; opacity:0.85; margin-bottom:12px;"></div>
+                <div id="cooking-recipes"></div>
+                <p style="font-size:11px; opacity:0.7; margin-top:12px;">
+                    Press <span class="key">E</span> on a firepit to open/close cooking.
+                </p>
+            `;
+            panel.addEventListener('mousedown', (e) => e.stopPropagation());
+            panel.addEventListener('click', (e) => e.stopPropagation());
+            document.body.appendChild(panel);
+        }
+
+        this.cookingPanel = panel;
+    }
+
+    toggleCooking(firepit = null) {
+        this.setupCookingPanel();
+
+        if (this.cookingOpen && (!firepit || firepit === this.activeCookingFirepit)) {
+            this.cookingOpen = false;
+            this.activeCookingFirepit = null;
+            if (this.cookingPanel) this.cookingPanel.style.display = 'none';
+            return;
+        }
+
+        if (!firepit && this.focusedItem?.type === 'firepit') {
+            firepit = this.focusedItem.firepit || null;
+        }
+
+        if (!firepit) {
+            this.showPickupFeedback('Look at a firepit to cook.', true);
+            return;
+        }
+
+        const distance = this.camera.position.distanceTo(firepit.group.position);
+        if (distance > 35) {
+            this.showPickupFeedback('Too far from firepit.', true);
+            return;
+        }
+
+        this.cookingOpen = true;
+        this.activeCookingFirepit = firepit;
+        if (this.cookingPanel) this.cookingPanel.style.display = 'block';
+        if (this.controls.locked) document.exitPointerLock();
+        this.updateCookingPanel();
+    }
+
+    cookRecipe(recipeId) {
+        const recipe = this.cookingRecipes.find(r => r.id === recipeId);
+        if (!recipe) return;
+        if (!this.cookingOpen || !this.activeCookingFirepit) return;
+
+        const distance = this.camera.position.distanceTo(this.activeCookingFirepit.group.position);
+        if (distance > 35) {
+            this.toggleCooking();
+            this.showPickupFeedback('Moved too far from firepit.', true);
+            return;
+        }
+
+        if (!this.consumeIngredients(recipe.ingredients)) {
+            this.showPickupFeedback('Missing ingredients.', true);
+            this.updateCookingPanel();
+            return;
+        }
+
+        this.addRecipeOutputs(recipe.outputs);
+        this.showPickupFeedback(`Cooked ${recipe.name}`, true);
+        this.updateInventoryUI();
+        this.updateCookingPanel();
+    }
+
+    consumeFood(itemKey) {
+        const effect = this.foodEffects[itemKey];
+        if (!effect) return false;
+        if ((this.inventory[itemKey] || 0) <= 0) return false;
+        if (!this.consumeInventoryItem(itemKey, 1)) return false;
+
+        const stats = this.playerStats;
+        stats.hunger = Math.min(stats.maxHunger, stats.hunger + effect.hunger);
+        stats.stamina = Math.min(stats.maxStamina, stats.stamina + effect.stamina);
+
+        if (effect.sprintBonus > 0 && effect.duration > 0) {
+            stats.sprintBuffStrength = Math.max(stats.sprintBuffStrength, effect.sprintBonus);
+            stats.sprintBuffTimer = Math.max(stats.sprintBuffTimer, effect.duration);
+        }
+        if (effect.regenBonus > 0 && effect.duration > 0) {
+            stats.regenBuffStrength = Math.max(stats.regenBuffStrength, effect.regenBonus);
+            stats.regenBuffTimer = Math.max(stats.regenBuffTimer, effect.duration);
+        }
+
+        this.showPickupFeedback(`Ate ${this.getItemLabel(itemKey)}`, true);
+        this.updateInventoryUI();
+        this.updateSurvivalUI();
+        return true;
+    }
+
+    consumeBestFood() {
+        const candidates = Object.keys(this.foodEffects).filter((itemKey) => (this.inventory[itemKey] || 0) > 0);
+        if (candidates.length === 0) {
+            this.showPickupFeedback('No edible food in inventory.', true);
+            return;
+        }
+        candidates.sort((a, b) => this.foodEffects[b].hunger - this.foodEffects[a].hunger);
+        this.consumeFood(candidates[0]);
+    }
+
+    updateCookingPanel() {
+        if (!this.cookingPanel) return;
+        if (!this.cookingOpen) {
+            this.cookingPanel.style.display = 'none';
+            return;
+        }
+
+        const target = document.getElementById('cooking-target');
+        const recipesWrap = document.getElementById('cooking-recipes');
+        if (!target || !recipesWrap) return;
+
+        const distance = this.activeCookingFirepit
+            ? this.camera.position.distanceTo(this.activeCookingFirepit.group.position)
+            : Infinity;
+        target.textContent = Number.isFinite(distance)
+            ? `Distance to firepit: ${distance.toFixed(1)}`
+            : 'No active firepit';
+
+        recipesWrap.innerHTML = '';
+
+        for (const recipe of this.cookingRecipes) {
+            const canCook = this.hasIngredients(recipe.ingredients);
+            const card = document.createElement('div');
+            card.style.background = 'rgba(255,255,255,0.08)';
+            card.style.border = '1px solid rgba(255,255,255,0.16)';
+            card.style.borderRadius = '8px';
+            card.style.padding = '10px';
+            card.style.marginBottom = '8px';
+
+            const ingredientsText = Object.entries(recipe.ingredients)
+                .map(([itemKey, amount]) => `${amount} ${this.getItemLabel(itemKey)}`)
+                .join(', ');
+            const outputsText = Object.entries(recipe.outputs)
+                .map(([itemKey, amount]) => `${amount} ${this.getItemLabel(itemKey)}`)
+                .join(', ');
+
+            const title = document.createElement('div');
+            title.style.fontWeight = '700';
+            title.textContent = recipe.name;
+            card.appendChild(title);
+
+            const desc = document.createElement('div');
+            desc.style.fontSize = '12px';
+            desc.style.opacity = '0.85';
+            desc.style.marginTop = '2px';
+            desc.textContent = recipe.description;
+            card.appendChild(desc);
+
+            const requires = document.createElement('div');
+            requires.style.fontSize = '12px';
+            requires.style.marginTop = '6px';
+            requires.textContent = `Needs: ${ingredientsText}`;
+            card.appendChild(requires);
+
+            const makes = document.createElement('div');
+            makes.style.fontSize = '12px';
+            makes.style.marginTop = '2px';
+            makes.textContent = `Makes: ${outputsText}`;
+            card.appendChild(makes);
+
+            const btn = document.createElement('button');
+            btn.textContent = canCook ? 'Cook' : 'Missing';
+            btn.disabled = !canCook;
+            btn.style.marginTop = '8px';
+            btn.style.padding = '6px 12px';
+            btn.style.border = 'none';
+            btn.style.borderRadius = '5px';
+            btn.style.cursor = canCook ? 'pointer' : 'not-allowed';
+            btn.style.background = canCook ? '#ff9800' : '#777';
+            btn.style.color = 'white';
+            btn.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                this.cookRecipe(recipe.id);
+            });
+            card.appendChild(btn);
+
+            recipesWrap.appendChild(card);
+        }
+    }
+
+    updateSurvivalSystems(delta, seconds) {
+        const stats = this.playerStats;
+        const moveState = this.controls?.moveState;
+        const moveInput = !!moveState && (moveState.forward || moveState.backward || moveState.left || moveState.right || moveState.up || moveState.down);
+        const isMoving = moveInput;
+        const sprinting = !!moveState?.sprint && moveInput && isMoving;
+
+        if (stats.sprintBuffTimer > 0) {
+            stats.sprintBuffTimer = Math.max(0, stats.sprintBuffTimer - delta);
+            if (stats.sprintBuffTimer <= 0) stats.sprintBuffStrength = 0;
+        }
+        if (stats.regenBuffTimer > 0) {
+            stats.regenBuffTimer = Math.max(0, stats.regenBuffTimer - delta);
+            if (stats.regenBuffTimer <= 0) stats.regenBuffStrength = 0;
+        }
+
+        const hungerRatio = THREE.MathUtils.clamp(stats.hunger / stats.maxHunger, 0, 1);
+        const hungerDrain = stats.hungerDrainPerSec + (sprinting ? 0.09 : 0);
+        stats.hunger = Math.max(0, stats.hunger - hungerDrain * delta);
+
+        const effectiveMaxStamina = stats.maxStamina * (0.45 + 0.55 * hungerRatio);
+        if (stats.stamina > effectiveMaxStamina) {
+            stats.stamina = Math.max(effectiveMaxStamina, stats.stamina - 30 * delta);
+        }
+
+        if (sprinting && stats.stamina > 0.01) {
+            const drainRate = 16 + (1 - hungerRatio) * 8;
+            stats.stamina = Math.max(0, stats.stamina - drainRate * delta);
+        } else {
+            let regenRate = 11 * (0.35 + hungerRatio * 0.65);
+            if (stats.regenBuffTimer > 0) regenRate *= (1 + stats.regenBuffStrength);
+            stats.stamina = Math.min(effectiveMaxStamina, stats.stamina + regenRate * delta);
+        }
+
+        const sprintEnergyFactor = stats.stamina > 0.01
+            ? THREE.MathUtils.clamp(stats.stamina / Math.max(1, effectiveMaxStamina), 0, 1)
+            : 0;
+        const starvationFactor = hungerRatio < 0.2 ? THREE.MathUtils.lerp(0.45, 1, hungerRatio / 0.2) : 1;
+        const sprintBuffFactor = stats.sprintBuffTimer > 0 ? (1 + stats.sprintBuffStrength) : 1;
+        this.camera.userData.sprintMultiplier = 1 + (CONFIG.camera.sprintMultiplier - 1) * sprintEnergyFactor * starvationFactor * sprintBuffFactor;
+
+        if (this.cookingOpen && this.activeCookingFirepit) {
+            const distance = this.camera.position.distanceTo(this.activeCookingFirepit.group.position);
+            if (distance > 38) {
+                this.toggleCooking();
+                this.showPickupFeedback('Too far from firepit.', true);
+            } else {
+                const cookingTarget = document.getElementById('cooking-target');
+                if (cookingTarget) cookingTarget.textContent = `Distance to firepit: ${distance.toFixed(1)}`;
+            }
+        }
+
+        if (seconds - this.lastSpoilageCheckSec >= 1.0) {
+            this.lastSpoilageCheckSec = seconds;
+            this.processFoodSpoilage(seconds);
+        }
+
+        if (seconds - this.lastInventoryTimerRefreshSec >= 0.25) {
+            this.lastInventoryTimerRefreshSec = seconds;
+            this.updateInventoryUI();
+        }
+
+        this.updateSurvivalUI();
+    }
+
+    processFoodSpoilage(nowSec) {
+        const spoiledParts = [];
+        const maxSpoilPerTick = 1;
+
+        for (const [itemKey, bucket] of Object.entries(this.perishableItems)) {
+            if (!bucket || bucket.length === 0) continue;
+            bucket.sort((a, b) => a - b);
+
+            let spoiled = 0;
+            while (bucket.length > 0 && bucket[0] <= nowSec && spoiled < maxSpoilPerTick) {
+                bucket.shift();
+                spoiled++;
+            }
+
+            if (spoiled > 0) {
+                this.inventory[itemKey] = Math.max(0, (this.inventory[itemKey] || 0) - spoiled);
+                spoiledParts.push(`${spoiled} ${this.getItemLabel(itemKey)}`);
+            }
+        }
+
+        if (spoiledParts.length > 0) {
+            this.showPickupFeedback(`Spoiled: ${spoiledParts.join(', ')}`, true);
+            this.updateInventoryUI();
+        }
+    }
+
     updateInventoryUI() {
         let invDiv = document.getElementById('inventory-panel');
         if (!invDiv) {
@@ -3775,15 +4388,22 @@ class TerrainScene {
             invDiv.style.borderTop = '1px solid rgba(255,255,255,0.2)';
             document.getElementById('info-panel').appendChild(invDiv);
         }
+
         invDiv.innerHTML = `<strong>Inventory:</strong><br>
             Branches: ${this.inventory.branches}<br>
-            Berries: ${this.inventory.berries}<br>
+            Berries: ${this.inventory.berries}${this.getSpoilageHint('berries')}<br>
             Stones: ${this.inventory.stones}<br>
             Logs: ${this.inventory.logs}<br>
-            Meat: ${this.inventory.meat}<br>
+            Raw Meat: ${this.inventory.meat}${this.getSpoilageHint('meat')}<br>
             Leather: ${this.inventory.leather}<br>
-            Red Mushrooms: ${this.inventory.redMushrooms}<br>
-            Yellow Mushrooms: ${this.inventory.yellowMushrooms}`;
+            Red Mushrooms: ${this.inventory.redMushrooms}${this.getSpoilageHint('redMushrooms')}<br>
+            Yellow Mushrooms: ${this.inventory.yellowMushrooms}${this.getSpoilageHint('yellowMushrooms')}<br>
+            Cooked Meat: ${this.inventory.cookedMeat}${this.getSpoilageHint('cookedMeat')}<br>
+            Grilled Red Mushroom: ${this.inventory.grilledRedMushroom}${this.getSpoilageHint('grilledRedMushroom')}<br>
+            Grilled Yellow Mushroom: ${this.inventory.grilledYellowMushroom}${this.getSpoilageHint('grilledYellowMushroom')}<br>
+            Berry-Glazed Cut: ${this.inventory.berryGlazedMeat}${this.getSpoilageHint('berryGlazedMeat')}<br>
+            Forest Skewer: ${this.inventory.forestSkewer}${this.getSpoilageHint('forestSkewer')}<br>
+            Hearty Stew: ${this.inventory.heartyStew}${this.getSpoilageHint('heartyStew')}`;
 
         if (this.inventory.tools.length > 0) {
             invDiv.innerHTML += `<br><strong>Tools:</strong>`;
@@ -3791,6 +4411,42 @@ class TerrainScene {
                 invDiv.innerHTML += `<br>${tool.type} (${tool.durability}%)`;
             });
         }
+
+        const foodActions = document.createElement('div');
+        foodActions.style.marginTop = '10px';
+        foodActions.style.display = 'flex';
+        foodActions.style.flexWrap = 'wrap';
+        foodActions.style.gap = '6px';
+
+        const edible = Object.keys(this.foodEffects).filter((itemKey) => (this.inventory[itemKey] || 0) > 0);
+        if (edible.length > 0) {
+            const title = document.createElement('div');
+            title.style.width = '100%';
+            title.style.fontWeight = '700';
+            title.style.marginBottom = '2px';
+            title.textContent = 'Eat Food:';
+            foodActions.appendChild(title);
+
+            edible.forEach((itemKey) => {
+                const btn = document.createElement('button');
+                btn.textContent = `${this.getItemLabel(itemKey)} (${this.inventory[itemKey]})`;
+                btn.style.padding = '4px 8px';
+                btn.style.border = 'none';
+                btn.style.borderRadius = '4px';
+                btn.style.background = '#4caf50';
+                btn.style.color = 'white';
+                btn.style.cursor = 'pointer';
+                btn.style.fontSize = '11px';
+                btn.addEventListener('mousedown', (e) => e.stopPropagation());
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    this.consumeFood(itemKey);
+                };
+                foodActions.appendChild(btn);
+            });
+        }
+
+        invDiv.appendChild(foodActions);
 
         this.updateViewmodel();
         this.updateActionbarUI();
@@ -3821,6 +4477,9 @@ class TerrainScene {
             }
         });
         interactables.push(...this.droppedItems);
+        this.firepits.forEach((firepit) => {
+            interactables.push(...firepit.interactionMeshes);
+        });
 
         const intersects = this.raycaster.intersectObjects(interactables);
 
@@ -3965,7 +4624,16 @@ class TerrainScene {
             const mesh = hit.object;
             const index = hit.instanceId;
 
-            if (index !== undefined && typeof mesh.getMatrixAt === 'function') {
+            if (mesh.userData.isFirepit && mesh.userData.firepitRef) {
+                this.focusedItem = { mesh, index: null, type: 'firepit', firepit: mesh.userData.firepitRef };
+                this.highlightMesh.geometry = this.firepitHighlightGeometry;
+                this.highlightMesh.position.copy(mesh.userData.firepitRef.group.position);
+                this.highlightMesh.position.y += 1.5;
+                this.highlightMesh.quaternion.identity();
+                this.highlightMesh.scale.set(1, 1, 1);
+                this.highlightMesh.visible = true;
+                return;
+            } else if (index !== undefined && typeof mesh.getMatrixAt === 'function') {
                 // Matrix extraction for InstancedMesh
                 const matrix = new THREE.Matrix4();
                 mesh.getMatrixAt(index, matrix);
@@ -4000,7 +4668,7 @@ class TerrainScene {
                     return;
                 }
             } else if (mesh.userData.isDrop) {
-                this.focusedItem = { mesh, index: null };
+                this.focusedItem = { mesh, index: null, type: 'drop' };
 
                 const pos = new THREE.Vector3();
                 const quat = new THREE.Quaternion();
@@ -4236,6 +4904,9 @@ class TerrainScene {
         }
 
         this.setupActionbar();
+        this.setupSurvivalUI();
+        this.setupCookingPanel();
+        this.updateSurvivalUI();
     }
 
     onWindowResize() {
@@ -4249,8 +4920,10 @@ class TerrainScene {
 
         const time = performance.now();
         const delta = 0.016;
+        const seconds = time * 0.001;
 
         this.controls.update(delta);
+        this.updateSurvivalSystems(delta, seconds);
 
         // Update Chunks
         if (!this.lastChunkUpdate || time - this.lastChunkUpdate > 500) {
@@ -4262,7 +4935,6 @@ class TerrainScene {
             this.waterMaterial.uniforms.time.value += delta;
         }
 
-        const seconds = time * 0.001;
         if (this.rainEffect) {
             this.rainEffect.update(delta, seconds);
         }
