@@ -1,0 +1,147 @@
+{
+  "asset": {
+    "generator": "glTF-Transform v4.3.0",
+    "version": "2.0"
+  },
+  "accessors": [
+    {
+      "type": "SCALAR",
+      "componentType": 5123,
+      "count": 534,
+      "bufferView": 0,
+      "byteOffset": 0
+    },
+    {
+      "type": "VEC3",
+      "componentType": 5126,
+      "count": 332,
+      "max": [
+        0.0018113888800144196,
+        0.0008089921320788562,
+        0.016492245718836784
+      ],
+      "min": [
+        -0.0018113888800144196,
+        -0.0008089921320788562,
+        -0.0008089921320788562
+      ],
+      "bufferView": 1,
+      "byteOffset": 0
+    },
+    {
+      "type": "VEC3",
+      "componentType": 5126,
+      "count": 332,
+      "bufferView": 1,
+      "byteOffset": 12
+    },
+    {
+      "type": "VEC2",
+      "componentType": 5126,
+      "count": 332,
+      "bufferView": 1,
+      "byteOffset": 24
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 1068,
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 1068,
+      "byteLength": 10624,
+      "byteStride": 32,
+      "target": 34962
+    }
+  ],
+  "samplers": [
+    {
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "textures": [
+    {
+      "source": 0,
+      "sampler": 0
+    }
+  ],
+  "images": [
+    {
+      "name": "Diffuse_palette_2.jpg",
+      "mimeType": "image/jpeg",
+      "uri": "baseColor.jpg"
+    }
+  ],
+  "buffers": [
+    {
+      "uri": "club_debug.bin",
+      "byteLength": 11692
+    }
+  ],
+  "materials": [
+    {
+      "name": "Diffuse_Color",
+      "extras": {
+        "fromFBX": {
+          "shadingModel": "Phong",
+          "isTruePBR": false
+        }
+      },
+      "pbrMetallicRoughness": {
+        "roughnessFactor": 0.272165536880493,
+        "metallicFactor": 0.400000005960464,
+        "baseColorTexture": {
+          "index": 0
+        }
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Hammer",
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 2,
+            "POSITION": 1,
+            "TEXCOORD_0": 3
+          },
+          "mode": 4,
+          "material": 0,
+          "indices": 0
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "RootNode",
+      "children": [
+        1
+      ]
+    },
+    {
+      "name": "Hammer",
+      "scale": [
+        100,
+        100,
+        100
+      ],
+      "mesh": 0
+    }
+  ],
+  "scenes": [
+    {
+      "name": "Root Scene",
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "scene": 0
+}

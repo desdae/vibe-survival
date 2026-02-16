@@ -27,6 +27,7 @@ npx serve .
 - `Left Ctrl`: sprint
 - `E`: pick up focused item / interact with firepit
 - `C`: open/close crafting panel
+- `I`: open/close inventory grid
 - `X`: eat the best available food from inventory
 - `Left Click`: use active tool / place building piece
 - `R`: rotate placement piece (`Triangle Wall` flips orientation)
@@ -38,13 +39,16 @@ npx serve .
 - Weather/environment toggles in UI: rain, mist, wind.
 - Volumetric cloud system with slow drifting clouds and UI toggle.
 - Camera mode toggle in UI: `Free-Fly` / `Walk`.
-- Inventory UI with resources, food, materials, mushrooms, and tools.
+- Inventory UI as an `8x5` slot grid with names, icons, and tooltips.
+- Inventory supports drag/drop rearranging and drag from inventory to actionbar.
+- Actionbar supports tools and food items.
 - Hunger + stamina survival loop with food-driven recovery and temporary buffs.
 - Firepit cooking UI with single-item and combo food recipes.
 - Food spoilage system with live countdown timers and weighted freshness blending.
 - Bottom-center 9-slot actionbar with drag-and-drop reordering.
 - UI sliders for camera speed and view distance.
 - Live FPS and triangle counters.
+- Animated undead skeleton warriors spawn near player start and roam using idle/walk/attack animations.
 
 ## Gathering and Resources
 
@@ -90,8 +94,8 @@ npx serve .
 - Each use costs `1` durability.
 - Tools break automatically at `0` durability.
 - `Stone Axe` is for chopping trees.
-- Axe viewmodel uses a sharp blade facing away from the player.
 - `Stone Club` cannot chop trees.
+- First-person tool viewmodels use low-poly GLTF assets loaded from `assets/models/`.
 
 ## Pig Combat and Loot
 
@@ -117,3 +121,20 @@ npx serve .
 - Rotate with `R`.
 - Snap support exists between walls, floors, roofs, and triangle walls.
 - Placeable structures: `Firepit`, `Wooden Wall`, `Wooden Floor`, `Wooden Roof`, `Triangle Wall`.
+
+## Icon Credits
+
+- Item/tool icons are from the **Game Icons** project.
+- Source: `https://game-icons.net/`
+- License: `CC BY 3.0`
+- License text: `https://github.com/game-icons/icons/blob/master/CC-BY-3.0.txt`
+- Icons are stored locally in `assets/icons/` and used by both inventory and actionbar UI.
+
+## Tool Model Credits
+
+- `Stone Axe` model source: `https://poly.pizza/m/lmO4Yq56e5`
+- `Stone Club` model source (using low-poly sledge hammer asset): `https://poly.pizza/m/yfAhQ8PECT`
+- `Skeleton Warrior` model source: `https://poly.pizza/m/wODZYCgX5Z`
+- Asset file host: `https://static.poly.pizza/`
+- License for all listed models: `Public Domain (CC0)`
+- Model files are stored locally in `assets/models/`.

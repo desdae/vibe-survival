@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
 // ===== CONFIGURATION =====
 const CONFIG = {
@@ -322,9 +324,13 @@ class TerrainGenerator {
                 THREE.UniformsLib.fog,
                 {
                     time: { value: 0 },
-                    waterColor: { value: new THREE.Color(0x006994) }, // Deeper blue
+                    waveAmp: { value: 4.8 },
+                    shallowColor: { value: new THREE.Color(0x2fd8ff) },
+                    deepColor: { value: new THREE.Color(0x0a5da8) },
+                    horizonColor: { value: new THREE.Color(0x72c7e6) },
+                    skyColor: { value: new THREE.Color(0xb8dded) },
                     foamColor: { value: new THREE.Color(0xffffff) },
-                    alpha: { value: 0.75 },
+                    alpha: { value: 0.86 },
                 }
             ]),
             vertexShader: `
@@ -333,42 +339,44 @@ class TerrainGenerator {
                 #include <logdepthbuf_pars_vertex>
                 
                 uniform float time;
+                uniform float waveAmp;
                 varying vec2 vUv;
                 varying float vWave;
+                varying vec3 vWorldPos;
+                varying vec3 vViewDir;
                 
-                // Simplex noise for vertex displacement could be expensive, 
-                // using superposition of sine waves for efficiency and good look
+                float waveHeight(vec2 p, float t) {
+                    // Broad ocean swells
+                    float s1 = sin(dot(p, vec2(0.008, 0.006)) + t * 0.45) * 1.45;
+                    float s2 = sin(dot(p, vec2(-0.006, 0.010)) + t * 0.33 + 1.7) * 1.10;
+                    // Mid-frequency chop
+                    float s3 = sin(dot(p, vec2(0.020, -0.016)) + t * 1.10 + 0.6) * 0.45;
+                    float s4 = cos(dot(p, vec2(0.030, 0.018)) + t * 1.55 + 2.3) * 0.35;
+                    // Fine ripples
+                    float s5 = sin(dot(p, vec2(0.075, 0.060)) + t * 2.90) * 0.12;
+                    return (s1 + s2 + s3 + s4 + s5) * waveAmp;
+                }
+
                 void main() {
                     vUv = uv;
                     
-                    // Transform to world space for seamless waves across chunks
                     vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-                    vec3 pos = position; // Original local pos for gl_Position calculation
+                    vec3 pos = position;
                     
-                    // Use world coordinates for wave function
-                    // World X and Z (horizontal plane).
-                    float wx = worldPosition.x;
-                    float wz = worldPosition.z;
-                    
-                    // Complex wave function
-                    // Large swells
-                    float w1 = sin(wx * 0.05 + time * 0.5) * 0.5;
-                    float w2 = cos(wz * 0.05 + time * 0.4) * 0.5;
-                    
-                    // Detail waves
-                    float w3 = sin(wx * 0.2 + wz * 0.1 + time * 1.5) * 0.2;
-                    float w4 = cos(wz * 0.2 - wx * 0.1 + time * 1.2) * 0.2;
-                    
-                    // Choppy surface
-                    float w5 = sin((wx + wz) * 0.5 + time * 3.0) * 0.1;
-                    
-                    float totalWave = w1 + w2 + w3 + w4 + w5;
-                    
-                    pos.z += totalWave; // Move vertex up/down in local space
-                    vWave = totalWave;
-                    
+                    // Use world XZ so waves line up across chunk borders.
+                    vec2 p = worldPosition.xz;
+                    float totalWave = waveHeight(p, time);
+
+                    // Plane is rotated X -90 in mesh, so local Z is world Y.
+                    pos.z += totalWave;
+
                     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
                     gl_Position = projectionMatrix * mvPosition;
+
+                    vec4 displacedWorld = modelMatrix * vec4(pos, 1.0);
+                    vWorldPos = displacedWorld.xyz;
+                    vWave = totalWave;
+                    vViewDir = normalize(cameraPosition - displacedWorld.xyz);
                     
                     #include <logdepthbuf_vertex>
                     #include <fog_vertex>
@@ -379,33 +387,68 @@ class TerrainGenerator {
                 #include <fog_pars_fragment>
                 #include <logdepthbuf_pars_fragment>
                 
-                uniform vec3 waterColor;
+                uniform vec3 shallowColor;
+                uniform vec3 deepColor;
+                uniform vec3 horizonColor;
+                uniform vec3 skyColor;
                 uniform vec3 foamColor;
                 uniform float alpha;
                 uniform float time;
+                uniform float waveAmp;
                 
                 varying vec2 vUv;
                 varying float vWave;
+                varying vec3 vWorldPos;
+                varying vec3 vViewDir;
+
+                float waveHeight(vec2 p, float t) {
+                    float s1 = sin(dot(p, vec2(0.008, 0.006)) + t * 0.45) * 1.45;
+                    float s2 = sin(dot(p, vec2(-0.006, 0.010)) + t * 0.33 + 1.7) * 1.10;
+                    float s3 = sin(dot(p, vec2(0.020, -0.016)) + t * 1.10 + 0.6) * 0.45;
+                    float s4 = cos(dot(p, vec2(0.030, 0.018)) + t * 1.55 + 2.3) * 0.35;
+                    float s5 = sin(dot(p, vec2(0.075, 0.060)) + t * 2.90) * 0.12;
+                    return (s1 + s2 + s3 + s4 + s5) * waveAmp;
+                }
                 
                 void main() {
                     #include <logdepthbuf_fragment>
-                    
-                    vec3 color = waterColor;
-                    
-                    // Foam on wave peaks
-                    float foam = smoothstep(0.6, 1.2, vWave);
-                    color = mix(color, foamColor, foam * 0.5);
-                    
-                    // Fake specular/sparkle
-                    float sparkleTime = time * 2.0;
-                    float sparkle = sin(vUv.x * 100.0 + sparkleTime) * cos(vUv.y * 100.0 + sparkleTime);
-                    sparkle = pow(max(0.0, sparkle), 20.0); // Sharp highlights
-                    
-                    color += vec3(sparkle) * 0.3;
-                    
-                    // Depth cue (darker in valleys of waves)
-                    color *= 0.8 + 0.2 * smoothstep(-1.0, 1.0, vWave);
-                    
+
+                    // Reconstruct dynamic normal from wave field (finite difference in world XZ).
+                    float eps = 0.8;
+                    vec2 p = vWorldPos.xz;
+                    float h = waveHeight(p, time);
+                    float hx = waveHeight(p + vec2(eps, 0.0), time);
+                    float hz = waveHeight(p + vec2(0.0, eps), time);
+                    vec3 normal = normalize(vec3(h - hx, eps, h - hz));
+
+                    vec3 viewDir = normalize(vViewDir);
+                    vec3 sunDir = normalize(vec3(0.35, 0.92, 0.18));
+
+                    // Fresnel reflection ramps up toward grazing angles.
+                    float ndv = clamp(dot(normal, viewDir), 0.0, 1.0);
+                    float fresnel = pow(1.0 - ndv, 3.8);
+
+                    // Base body color: cyan at peaks / shallows, deeper blue in troughs.
+                    float waveMix = smoothstep(-2.0, 2.2, vWave);
+                    vec3 body = mix(deepColor, shallowColor, waveMix);
+
+                    // Sky reflection tint (horizon + zenith blend).
+                    float horizon = pow(1.0 - max(viewDir.y, 0.0), 1.25);
+                    vec3 reflectedSky = mix(skyColor, horizonColor, horizon);
+                    vec3 color = mix(body, reflectedSky, fresnel * 0.58);
+
+                    // Sun specular highlight (no moving grid artifact).
+                    vec3 halfVec = normalize(sunDir + viewDir);
+                    float spec = pow(max(dot(normal, halfVec), 0.0), 180.0);
+                    color += vec3(1.0, 1.0, 0.98) * (spec * 0.42);
+
+                    // Foam on highest crests.
+                    float foam = smoothstep(1.9, 2.75, vWave);
+                    color = mix(color, foamColor, foam * 0.32);
+
+                    // Soft highlight compression to avoid over-bright patches.
+                    color = color / (1.0 + color * 0.30);
+
                     gl_FragColor = vec4(color, alpha);
 
                     #include <fog_fragment>
@@ -449,6 +492,7 @@ class TerrainChunk {
         this.waterMesh = null;
         this.instancedMeshes = [];
         this.heightField = null;
+        this.geometrySupportCache = new WeakMap();
 
         this.build();
     }
@@ -549,9 +593,9 @@ class TerrainChunk {
                     const r = 2 + Math.random() * 4;
                     const mx = tree.x + Math.cos(angle) * r;
                     const mz = tree.z + Math.sin(angle) * r;
-                    const mh = this.generator.getElevation(this.x + mx, this.z + mz);
-                    if (mh > CONFIG.terrain.waterLevel + 2) {
-                        mushroomData.push({ x: mx, y: mh, z: mz, type: Math.random() > 0.5 ? 'red' : 'yellow' });
+                    const mh = this.sampleHeightAtWorld(this.x + mx, this.z + mz);
+                    if (mh !== null && mh > CONFIG.terrain.waterLevel + 2) {
+                        mushroomData.push({ x: mx, z: mz, type: Math.random() > 0.5 ? 'red' : 'yellow' });
                     }
                 }
             });
@@ -560,9 +604,9 @@ class TerrainChunk {
         for (let i = 0; i < 15; i++) {
             const mx = (Math.random() - 0.5) * this.size;
             const mz = (Math.random() - 0.5) * this.size;
-            const mh = this.generator.getElevation(this.x + mx, this.z + mz);
+            const mh = this.sampleHeightAtWorld(this.x + mx, this.z + mz);
             if (mh > CONFIG.terrain.waterLevel + 2) {
-                mushroomData.push({ x: mx, y: mh, z: mz, type: Math.random() > 0.5 ? 'red' : 'yellow' });
+                mushroomData.push({ x: mx, z: mz, type: Math.random() > 0.5 ? 'red' : 'yellow' });
             }
         }
 
@@ -575,7 +619,8 @@ class TerrainChunk {
         this.mesh.castShadow = true;
 
         // Water
-        const waterGeo = new THREE.PlaneGeometry(this.size, this.size, 16, 16);
+        // Dense enough tessellation for visible vertex-displaced procedural waves.
+        const waterGeo = new THREE.PlaneGeometry(this.size, this.size, 96, 96);
         this.waterMesh = new THREE.Mesh(waterGeo, this.waterMaterial);
         this.waterMesh.rotation.x = -Math.PI / 2;
         this.waterMesh.position.set(this.x, CONFIG.terrain.waterLevel, this.z);
@@ -599,10 +644,10 @@ class TerrainChunk {
                     const r = 5 + Math.random() * 15;
                     const bx = tree.x + Math.cos(angle) * r;
                     const bz = tree.z + Math.sin(angle) * r;
-                    const bh = this.generator.getElevation(this.x + bx, this.z + bz);
+                    const bh = this.sampleGroundY(this.x + bx, this.z + bz);
 
                     if (bh > CONFIG.terrain.waterLevel + 2) {
-                        branchData.push({ x: bx, y: bh, z: bz });
+                        branchData.push({ x: bx, z: bz });
                     }
                 }
             });
@@ -729,24 +774,44 @@ class TerrainChunk {
         });
 
         const dummy = new THREE.Object3D();
+        const up = new THREE.Vector3(0, 1, 0);
+        const yawQuat = new THREE.Quaternion();
+        const slopeQuat = new THREE.Quaternion();
+        const normal = new THREE.Vector3();
+        const tmpCorner = new THREE.Vector3();
 
         this.branchPrototypes.forEach((proto, idx) => {
             const instances = clusters[idx];
             if (instances.length === 0) return;
+            const supportPoints = this.getGeometrySupportPoints(proto);
 
             const mesh = new THREE.InstancedMesh(proto, this.vegMaterials.log, instances.length);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
 
             instances.forEach((data, i) => {
-                dummy.position.set(this.x + data.x, data.y, this.z + data.z);
+                const worldX = this.x + data.x;
+                const worldZ = this.z + data.z;
                 const scale = 0.5 + Math.random() * 0.5;
                 dummy.scale.set(scale, scale, scale);
-                dummy.rotation.set(
-                    (Math.random() - 0.5) * 0.5,
-                    Math.random() * Math.PI * 2,
-                    (Math.random() - 0.5) * 0.5
-                );
+
+                this.sampleGroundNormal(worldX, worldZ, normal);
+                yawQuat.setFromAxisAngle(up, Math.random() * Math.PI * 2);
+                slopeQuat.setFromUnitVectors(up, normal);
+                dummy.quaternion.multiplyQuaternions(slopeQuat, yawQuat);
+
+                let supportY = -Infinity;
+                for (let p = 0; p < supportPoints.length; p++) {
+                    tmpCorner
+                        .copy(supportPoints[p])
+                        .multiply(dummy.scale)
+                        .applyQuaternion(dummy.quaternion);
+                    const groundY = this.sampleGroundY(worldX + tmpCorner.x, worldZ + tmpCorner.z);
+                    const cornerSupportY = groundY + 0.02 - tmpCorner.y;
+                    if (cornerSupportY > supportY) supportY = cornerSupportY;
+                }
+
+                dummy.position.set(worldX, supportY, worldZ);
                 dummy.updateMatrix();
                 mesh.setMatrixAt(i, dummy.matrix);
             });
@@ -796,6 +861,68 @@ class TerrainChunk {
         });
     }
 
+    sampleGroundY(worldX, worldZ) {
+        const h = this.sampleHeightAtWorld(worldX, worldZ);
+        if (h !== null && h !== undefined) return h;
+        return this.generator.getElevation(worldX, worldZ);
+    }
+
+    sampleGroundNormal(worldX, worldZ, outNormal = null) {
+        const step = Math.max(0.4, this.size / this.resolution * 0.08);
+        const hL = this.sampleGroundY(worldX - step, worldZ);
+        const hR = this.sampleGroundY(worldX + step, worldZ);
+        const hD = this.sampleGroundY(worldX, worldZ - step);
+        const hU = this.sampleGroundY(worldX, worldZ + step);
+        const normal = outNormal || new THREE.Vector3();
+        normal.set(hL - hR, step * 2, hD - hU);
+        if (normal.lengthSq() < 1e-8) {
+            normal.set(0, 1, 0);
+            return normal;
+        }
+        normal.normalize();
+        if (normal.y < 0) normal.multiplyScalar(-1);
+        return normal;
+    }
+
+    getGeometrySupportPoints(geometry) {
+        if (!geometry) return [new THREE.Vector3(0, 0, 0)];
+        const cached = this.geometrySupportCache.get(geometry);
+        if (cached) return cached;
+
+        const points = [];
+        const pushPoint = (x, y, z) => points.push(new THREE.Vector3(x, y, z));
+
+        const posAttr = geometry.attributes?.position;
+        if (posAttr) {
+            for (let i = 0; i < posAttr.count; i++) {
+                pushPoint(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+            }
+        }
+
+        if (!geometry.boundingBox) geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        const min = bb.min;
+        const max = bb.max;
+        const midX = (min.x + max.x) * 0.5;
+        const midY = (min.y + max.y) * 0.5;
+        const midZ = (min.z + max.z) * 0.5;
+
+        pushPoint(min.x, min.y, min.z);
+        pushPoint(min.x, min.y, max.z);
+        pushPoint(max.x, min.y, min.z);
+        pushPoint(max.x, min.y, max.z);
+        pushPoint(min.x, max.y, min.z);
+        pushPoint(min.x, max.y, max.z);
+        pushPoint(max.x, max.y, min.z);
+        pushPoint(max.x, max.y, max.z);
+        pushPoint(midX, min.y, midZ);
+        pushPoint(midX, max.y, midZ);
+        pushPoint(midX, midY, midZ);
+
+        this.geometrySupportCache.set(geometry, points);
+        return points;
+    }
+
     generateLogs(logData) {
         if (!this.logPrototype) return;
 
@@ -803,26 +930,31 @@ class TerrainChunk {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         const dummy = new THREE.Object3D();
+        const up = new THREE.Vector3(0, 1, 0);
+        const baseQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI * 0.5);
+        const yawQuat = new THREE.Quaternion();
+        const slopeQuat = new THREE.Quaternion();
+        const normal = new THREE.Vector3();
+        const tmpCorner = new THREE.Vector3();
+        const supportPoints = this.getGeometrySupportPoints(this.logPrototype);
 
         logData.forEach((data, i) => {
             const worldX = this.x + data.x;
             const worldZ = this.z + data.z;
-            const groundH = this.generator.getElevation(worldX, worldZ);
-            const normal = this.generator.getNormal(worldX, worldZ);
-
-            // Position: Ground height + radius (0.9)
-            dummy.position.set(worldX, groundH + 0.9, worldZ);
-
-            // Rotation Logic:
-            // 1. Start with laying them flat on the ground (rotating around X or Z)
-            const baseQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI * 0.5);
-            // 2. Give them a random spin around the vertical axis
-            const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2);
-            // 3. Align them to the surface normal
-            const slopeQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
-
-            // Combine: Align to slope -> apply random rotation -> lay flat
+            this.sampleGroundNormal(worldX, worldZ, normal);
+            yawQuat.setFromAxisAngle(up, Math.random() * Math.PI * 2);
+            slopeQuat.setFromUnitVectors(up, normal);
             dummy.quaternion.copy(slopeQuat).multiply(yawQuat).multiply(baseQuat);
+
+            let supportY = -Infinity;
+            for (let p = 0; p < supportPoints.length; p++) {
+                tmpCorner.copy(supportPoints[p]).applyQuaternion(dummy.quaternion);
+                const groundY = this.sampleGroundY(worldX + tmpCorner.x, worldZ + tmpCorner.z);
+                const cornerSupportY = groundY + 0.02 - tmpCorner.y;
+                if (cornerSupportY > supportY) supportY = cornerSupportY;
+            }
+
+            dummy.position.set(worldX, supportY, worldZ);
 
             dummy.updateMatrix();
             mesh.setMatrixAt(i, dummy.matrix);
@@ -850,7 +982,11 @@ class TerrainChunk {
             capMesh.castShadow = true;
 
             data.forEach((m, i) => {
-                dummy.position.set(this.x + m.x, m.y, this.z + m.z);
+                const worldX = this.x + m.x;
+                const worldZ = this.z + m.z;
+                const groundY = this.sampleHeightAtWorld(worldX, worldZ);
+                const baseY = (groundY !== null ? groundY : this.generator.getElevation(worldX, worldZ)) + 0.03;
+                dummy.position.set(worldX, baseY, worldZ);
                 dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
                 const s = 0.8 + Math.random() * 0.4;
                 dummy.scale.set(s, s, s);
@@ -1326,45 +1462,65 @@ class TreeGenerator {
     }
 
     createProceduralStone(seed) {
-        const size = (0.5 + Math.random() * 1.5) * 1.5; // Base size also 50% bigger
-        let geometry = new THREE.IcosahedronGeometry(size, 1); // Detail 1 for more vertices to make "holes"
+        let state = ((seed + 1) * 1779033703) >>> 0;
+        const rand = () => {
+            state = (state ^ (state << 13)) >>> 0;
+            state = (state ^ (state >> 17)) >>> 0;
+            state = (state ^ (state << 5)) >>> 0;
+            return state / 4294967295;
+        };
 
-        // Merge vertices so shared vertices move together during displacement
-        geometry = BufferGeometryUtils.mergeVertices(geometry);
+        const size = (0.65 + rand() * 1.25) * 1.45;
+        const geometry = new THREE.IcosahedronGeometry(size, 2);
 
-        // Randomly squish and deform
         const posAttr = geometry.attributes.position;
         const v = new THREE.Vector3();
+        const n = new THREE.Vector3();
 
-        // Use a consistent squish for the whole stone
-        const squishX = 0.8 + Math.random() * 0.4;
-        const squishY = 0.4 + Math.random() * 0.4;
-        const squishZ = 0.8 + Math.random() * 0.4;
+        const squishX = 0.82 + rand() * 0.32;
+        const squishY = 0.5 + rand() * 0.3;
+        const squishZ = 0.82 + rand() * 0.32;
+        const radialMin = size * 0.58;
+        const radialMax = size * 1.14;
+        const freqA = 2.8 + rand() * 1.8;
+        const freqB = 4.6 + rand() * 2.4;
+        const phaseA = rand() * Math.PI * 2;
+        const phaseB = rand() * Math.PI * 2;
 
+        // Deformation is derived from normal direction, so seam-duplicate vertices move identically.
         for (let i = 0; i < posAttr.count; i++) {
             v.fromBufferAttribute(posAttr, i);
+            n.copy(v).normalize();
 
-            // Apply squish
+            const ridge = Math.sin(
+                n.x * freqA +
+                n.y * (freqA * 0.7) +
+                n.z * (freqA * 1.2) +
+                phaseA
+            );
+            const dents = Math.sin(
+                (n.x * 0.9 - n.y * 1.3 + n.z * 0.6) * freqB +
+                phaseB
+            );
+
+            const radialScale = 0.9 + ridge * 0.08 + dents * 0.05;
+            v.multiplyScalar(radialScale);
+
             v.x *= squishX;
             v.y *= squishY;
             v.z *= squishZ;
 
-            // Add slight per-vertex noise
-            v.x += (Math.random() - 0.5) * 0.2;
-            v.y += (Math.random() - 0.5) * 0.2;
-            v.z += (Math.random() - 0.5) * 0.2;
-
-            // Create "holes" or deep pits
-            // If a random check passes, we push the vertex significantly towards the center
-            if (Math.random() < 0.15) {
-                const depth = 0.3 + Math.random() * 0.4;
-                v.multiplyScalar(1.0 - depth);
+            const len = v.length();
+            const clamped = THREE.MathUtils.clamp(len, radialMin, radialMax);
+            if (len > 1e-5) {
+                v.multiplyScalar(clamped / len);
             }
 
             posAttr.setXYZ(i, v.x, v.y, v.z);
         }
 
-        geometry.computeVertexNormals(); // Ensure smooth but rugged look
+        geometry.computeVertexNormals();
+        geometry.computeBoundingSphere();
         return geometry;
     }
 
@@ -1398,7 +1554,6 @@ class SplashSystem {
                 }
             ]),
             vertexShader: `
-                attribute mat4 instanceMatrix;
                 uniform float uTime;
                 uniform float uDuration;
                 attribute float aStartTime;
@@ -2101,6 +2256,235 @@ class Rabbit {
     }
 }
 
+class SkeletonWarrior {
+    constructor(scene, generator, startPos, world, template, animations, spawnCenter = null) {
+        this.scene = scene;
+        this.generator = generator;
+        this.world = world;
+
+        this.group = cloneSkeleton(template);
+        this.group.position.copy(startPos);
+        this.group.scale.setScalar(1.0);
+        const styleSkeletonMaterial = (mat) => {
+            if (!mat) return mat;
+            const out = mat.clone ? mat.clone() : mat;
+            if (out.color) out.color.setHex(0xf2f2f2);
+            if (out.emissive) out.emissive.setHex(0x151515);
+            if (Object.prototype.hasOwnProperty.call(out, 'roughness')) out.roughness = 0.9;
+            if (Object.prototype.hasOwnProperty.call(out, 'metalness')) out.metalness = 0.0;
+            out.needsUpdate = true;
+            return out;
+        };
+        this.group.traverse((node) => {
+            if (!node.isMesh) return;
+            node.castShadow = false;
+            node.receiveShadow = false;
+            node.frustumCulled = false;
+            if (Array.isArray(node.material)) {
+                node.material = node.material.map((mat) => styleSkeletonMaterial(mat));
+            } else {
+                node.material = styleSkeletonMaterial(node.material);
+            }
+        });
+        this.scene.add(this.group);
+
+        this.spawnCenter = (spawnCenter || new THREE.Vector3(startPos.x, 0, startPos.z)).clone();
+        this.wanderRadius = 420;
+        this.maxSpawnDistance = 760;
+        this.speed = 2.2 + Math.random() * 0.8;
+        this.turnLerp = 6.5;
+
+        this.state = 'idle';
+        this.stateTimer = 0.8 + Math.random() * 1.6;
+        this.attackCooldown = 1.6 + Math.random() * 1.8;
+
+        this.targetPos = new THREE.Vector3(startPos.x, startPos.y, startPos.z);
+        this.groundClearance = 0.04;
+        this.footOffset = this.computeFootOffset();
+
+        this.tmpDir = new THREE.Vector3();
+        this.tmpToSpawn = new THREE.Vector3();
+        this.tmpToPlayer = new THREE.Vector3();
+
+        this.mixer = null;
+        this.currentAction = null;
+        this.idleAction = null;
+        this.walkAction = null;
+        this.attackAction = null;
+        this.attackDuration = 0.9;
+        this.setupAnimations(animations || []);
+
+        this.enterIdle(true);
+    }
+
+    setupAnimations(animations) {
+        if (!animations.length) return;
+        this.mixer = new THREE.AnimationMixer(this.group);
+
+        const findClip = (tokens) => animations.find(clip => {
+            const name = clip.name.toLowerCase();
+            return tokens.some(token => name.includes(token));
+        }) || null;
+
+        const idleClip = findClip(['idle']);
+        const walkClip = findClip(['walk', 'run']);
+        const attackClip = findClip(['attack']);
+
+        if (idleClip) {
+            this.idleAction = this.mixer.clipAction(idleClip);
+            this.idleAction.setLoop(THREE.LoopRepeat, Infinity);
+        }
+
+        if (walkClip) {
+            this.walkAction = this.mixer.clipAction(walkClip);
+            this.walkAction.setLoop(THREE.LoopRepeat, Infinity);
+            if (walkClip.name.toLowerCase().includes('run')) {
+                this.walkAction.timeScale = 0.68;
+            }
+        }
+
+        if (attackClip) {
+            this.attackAction = this.mixer.clipAction(attackClip);
+            this.attackAction.setLoop(THREE.LoopOnce, 1);
+            this.attackAction.clampWhenFinished = true;
+            this.attackDuration = Math.max(0.45, attackClip.duration || 0.9);
+        }
+    }
+
+    setAction(nextAction, fade = 0.2) {
+        if (!nextAction || this.currentAction === nextAction) return;
+        if (this.currentAction) this.currentAction.fadeOut(fade);
+        nextAction.reset().fadeIn(fade).play();
+        this.currentAction = nextAction;
+    }
+
+    getGroundY(x, z) {
+        if (this.world && typeof this.world.getTerrainHeightAtPosition === 'function') {
+            return this.world.getTerrainHeightAtPosition(x, z);
+        }
+        return this.generator.getElevation(x, z);
+    }
+
+    computeFootOffset() {
+        this.group.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(this.group);
+        return this.group.position.y - bounds.min.y;
+    }
+
+    pickNewTarget() {
+        const minDist = 60;
+        const maxDist = this.wanderRadius;
+        let targetX = this.spawnCenter.x;
+        let targetZ = this.spawnCenter.z;
+
+        for (let attempt = 0; attempt < 10; attempt++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = minDist + Math.random() * (maxDist - minDist);
+            const x = this.spawnCenter.x + Math.cos(angle) * dist;
+            const z = this.spawnCenter.z + Math.sin(angle) * dist;
+            const h = this.getGroundY(x, z);
+            if (h > CONFIG.terrain.waterLevel + 2.0) {
+                targetX = x;
+                targetZ = z;
+                break;
+            }
+        }
+
+        this.targetPos.set(targetX, this.group.position.y, targetZ);
+    }
+
+    enterIdle(initial = false) {
+        this.state = 'idle';
+        this.stateTimer = initial ? (0.4 + Math.random() * 0.8) : (0.8 + Math.random() * 2.0);
+        this.setAction(this.idleAction || this.walkAction, initial ? 0.0 : 0.18);
+    }
+
+    enterWalk() {
+        this.state = 'walk';
+        this.stateTimer = 2.0 + Math.random() * 4.0;
+        this.pickNewTarget();
+        this.setAction(this.walkAction || this.idleAction, 0.18);
+    }
+
+    triggerAttack() {
+        if (!this.attackAction) return false;
+        this.state = 'attack';
+        this.stateTimer = this.attackDuration;
+        this.attackCooldown = 2.6 + Math.random() * 2.2;
+        this.setAction(this.attackAction, 0.1);
+        return true;
+    }
+
+    update(delta, time, camera) {
+        if (this.mixer) {
+            this.mixer.update(delta);
+        }
+
+        this.attackCooldown = Math.max(0, this.attackCooldown - delta);
+
+        const groundY = this.getGroundY(this.group.position.x, this.group.position.z);
+        this.group.position.y = groundY + this.footOffset + this.groundClearance;
+
+        if (this.state !== 'attack' && this.attackAction && camera) {
+            this.tmpToPlayer.copy(camera.position).sub(this.group.position);
+            this.tmpToPlayer.y = 0;
+            const playerDist = this.tmpToPlayer.length();
+            if (playerDist < 16 && this.attackCooldown <= 0) {
+                this.triggerAttack();
+            }
+        }
+
+        if (this.state === 'attack') {
+            this.stateTimer -= delta;
+            if (this.stateTimer <= 0) {
+                if (Math.random() < 0.4) this.enterIdle();
+                else this.enterWalk();
+            }
+            return;
+        }
+
+        if (this.state === 'idle') {
+            this.stateTimer -= delta;
+            if (this.stateTimer <= 0) this.enterWalk();
+            return;
+        }
+
+        this.stateTimer -= delta;
+
+        this.tmpDir.subVectors(this.targetPos, this.group.position);
+        this.tmpDir.y = 0;
+        const distToTarget = this.tmpDir.length();
+
+        if (distToTarget > 1e-4) {
+            this.tmpDir.multiplyScalar(1 / distToTarget);
+            this.group.position.addScaledVector(this.tmpDir, this.speed * delta);
+
+            const desiredYaw = Math.atan2(this.tmpDir.x, this.tmpDir.z);
+            let yawDelta = desiredYaw - this.group.rotation.y;
+            yawDelta = Math.atan2(Math.sin(yawDelta), Math.cos(yawDelta));
+            this.group.rotation.y += yawDelta * Math.min(1, this.turnLerp * delta);
+        }
+
+        this.tmpToSpawn.set(this.group.position.x - this.spawnCenter.x, 0, this.group.position.z - this.spawnCenter.z);
+        const distToSpawnSq = this.tmpToSpawn.lengthSq();
+        if (distToSpawnSq > this.maxSpawnDistance * this.maxSpawnDistance) {
+            this.targetPos.set(this.spawnCenter.x, this.group.position.y, this.spawnCenter.z);
+        }
+
+        if (distToTarget < 2.0 || this.stateTimer <= 0) {
+            if (Math.random() < 0.25) this.enterIdle();
+            else this.enterWalk();
+        }
+    }
+
+    dispose() {
+        if (this.mixer) {
+            this.mixer.stopAllAction();
+        }
+        this.scene.remove(this.group);
+    }
+}
+
 class Firepit {
     constructor(scene, pos) {
         this.scene = scene;
@@ -2499,6 +2883,120 @@ class TerrainScene {
             forestSkewer: 'Forest Skewer',
             heartyStew: 'Hearty Stew'
         };
+        this.itemDefinitions = {
+            branches: { icon: 'BR', iconPath: 'assets/icons/branches.svg', description: 'Light wood for basic crafting.', stackSize: 99, bindable: false },
+            berries: { icon: 'BE', iconPath: 'assets/icons/berries.svg', description: 'Fresh fruit. Small hunger recovery.', stackSize: 99, bindable: true },
+            stones: { icon: 'ST', iconPath: 'assets/icons/stones.svg', description: 'Stone resource for tools and structures.', stackSize: 99, bindable: false },
+            logs: { icon: 'LG', iconPath: 'assets/icons/logs.svg', description: 'Heavy wood used for building and crafting.', stackSize: 99, bindable: false },
+            meat: { icon: 'RM', iconPath: 'assets/icons/meat.svg', description: 'Raw meat. Better cooked at a firepit.', stackSize: 99, bindable: false },
+            leather: { icon: 'LE', iconPath: 'assets/icons/leather.svg', description: 'Animal hide used for future crafting.', stackSize: 99, bindable: false },
+            redMushrooms: { icon: 'MR', iconPath: 'assets/icons/redMushrooms.svg', description: 'Forest mushroom. Cook before eating.', stackSize: 99, bindable: false },
+            yellowMushrooms: { icon: 'MY', iconPath: 'assets/icons/yellowMushrooms.svg', description: 'Earthy mushroom. Cook before eating.', stackSize: 99, bindable: false },
+            cookedMeat: { icon: 'CM', iconPath: 'assets/icons/cookedMeat.svg', description: 'Cooked protein. Solid hunger and stamina restore.', stackSize: 99, bindable: true },
+            grilledRedMushroom: { icon: 'GR', iconPath: 'assets/icons/grilledRedMushroom.svg', description: 'Grilled mushroom with regen support.', stackSize: 99, bindable: true },
+            grilledYellowMushroom: { icon: 'GY', iconPath: 'assets/icons/grilledYellowMushroom.svg', description: 'Grilled mushroom with stamina support.', stackSize: 99, bindable: true },
+            berryGlazedMeat: { icon: 'BG', iconPath: 'assets/icons/berryGlazedMeat.svg', description: 'Combo meal with strong sprint boost.', stackSize: 99, bindable: true },
+            forestSkewer: { icon: 'FS', iconPath: 'assets/icons/forestSkewer.svg', description: 'Balanced combo food with long buffs.', stackSize: 99, bindable: true },
+            heartyStew: { icon: 'HS', iconPath: 'assets/icons/heartyStew.svg', description: 'High-tier meal with strong recovery.', stackSize: 99, bindable: true }
+        };
+        this.toolDefinitions = {
+            'Stone Axe': {
+                icon: 'AX',
+                iconPath: 'assets/icons/tool_stone_axe.svg',
+                shortName: 'Axe',
+                maxDurability: 100,
+                modelPath: 'assets/models/axe.glb',
+                viewmodel: {
+                    holdPosition: [0.45, -0.67, -0.98],
+                    holdRotation: [0.02, -1.72, 0.08],
+                    modelPosition: [0.0, 0.0, 0.0],
+                    modelRotation: [0.0, 0.0, 0.0],
+                    modelScale: [1.14, 1.14, 1.14]
+                },
+                description: 'Cuts trees. Loses durability each use.'
+            },
+            'Stone Club': {
+                icon: 'CL',
+                iconPath: 'assets/icons/tool_stone_club.svg',
+                shortName: 'Club',
+                maxDurability: 100,
+                modelPath: 'assets/models/club.glb',
+                viewmodel: {
+                    holdPosition: [0.47, -0.65, -1.02],
+                    holdRotation: [0.10, -1.68, 0.10],
+                    modelPosition: [0.02, 0.02, 0.00],
+                    modelRotation: [0.0, Math.PI * 0.5, Math.PI * 0.5],
+                    modelScale: [0.96, 0.96, 0.96],
+                    gripOffset: [0.0, 0.0, -1.52]
+                },
+                description: 'Melee weapon for pigs. Loses durability each hit.'
+            }
+        };
+        this.craftingRecipes = [
+            {
+                id: 'stone_axe',
+                buttonId: 'btn-craft-axe',
+                name: 'Stone Axe',
+                ingredients: { branches: 1, stones: 2 },
+                result: { kind: 'tool', type: 'Stone Axe' },
+                successFeedback: 'Stone Axe',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'stone_club',
+                buttonId: 'btn-craft-club',
+                name: 'Stone Club',
+                ingredients: { logs: 1, stones: 1 },
+                result: { kind: 'tool', type: 'Stone Club' },
+                successFeedback: 'Stone Club',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'firepit',
+                buttonId: 'btn-craft-firepit',
+                name: 'Firepit',
+                ingredients: { logs: 5, stones: 2 },
+                result: { kind: 'placement', placementType: 'firepit' },
+                successFeedback: 'Placing Firepit...',
+                successFeedbackRaw: true
+            },
+            {
+                id: 'wall',
+                buttonId: 'btn-craft-wall',
+                name: 'Wooden Wall',
+                ingredients: { logs: 2 },
+                result: { kind: 'placement', placementType: 'wall' },
+                successFeedback: 'Placing Wall... (R to rotate)',
+                successFeedbackRaw: true
+            },
+            {
+                id: 'floor',
+                buttonId: 'btn-craft-floor',
+                name: 'Wooden Floor',
+                ingredients: { logs: 2 },
+                result: { kind: 'placement', placementType: 'floor' },
+                successFeedback: 'Placing Floor... (R to rotate)',
+                successFeedbackRaw: true
+            },
+            {
+                id: 'roof',
+                buttonId: 'btn-craft-roof',
+                name: 'Wooden Roof',
+                ingredients: { logs: 2 },
+                result: { kind: 'placement', placementType: 'roof' },
+                successFeedback: 'Placing Roof... (R to rotate)',
+                successFeedbackRaw: true
+            },
+            {
+                id: 'tri_wall',
+                buttonId: 'btn-craft-tri-wall',
+                name: 'Triangle Wall',
+                ingredients: { logs: 1 },
+                result: { kind: 'placement', placementType: 'tri_wall' },
+                successFeedback: 'Placing Triangle Wall... (R to rotate)',
+                successFeedbackRaw: true
+            }
+        ];
         this.perishableConfig = {
             berries: { shelfLife: 720, label: 'Berries' },
             meat: { shelfLife: 620, label: 'Raw Meat' },
@@ -2581,6 +3079,14 @@ class TerrainScene {
         };
         this.lastSpoilageCheckSec = 0;
         this.lastInventoryTimerRefreshSec = 0;
+        this.inventoryOpen = false;
+        this.inventoryGridCols = 8;
+        this.inventoryGridRows = 5;
+        this.inventorySlots = new Array(this.inventoryGridCols * this.inventoryGridRows).fill(null);
+        this.inventoryPanel = null;
+        this.inventoryGridElement = null;
+        this.inventorySlotElements = [];
+        this.inventoryDragSource = null;
         this.survivalHudRefs = null;
         this.cookingPanel = null;
         this.cookingOpen = false;
@@ -2590,10 +3096,17 @@ class TerrainScene {
         this.activeSlotIndex = 0;
         this.actionbarSlotElements = [];
         this.droppedItems = [];
+        this.tmpDropSupportVec = new THREE.Vector3();
+        this.tmpDropNormal = new THREE.Vector3();
+        this.tmpDropUp = new THREE.Vector3(0, 1, 0);
+        this.tmpDropYawQuat = new THREE.Quaternion();
+        this.tmpDropSlopeQuat = new THREE.Quaternion();
         this.focusedItem = null; // { mesh, index, type }
         this.craftingOpen = false;
         this.pigs = [];
         this.rabbits = [];
+        this.skeletonWarriors = [];
+        this.playerSpawnPoint = new THREE.Vector3();
         this.firepits = [];
         this.walls = [];
         this.triWalls = [];
@@ -2645,8 +3158,10 @@ class TerrainScene {
         this.setupControls();
         this.setupUI();
         this.createViewmodel();
+        this.playerSpawnPoint.set(this.camera.position.x, 0, this.camera.position.z);
         this.spawnPigs();
         this.spawnRabbits();
+        this.spawnSkeletonWarriors(20);
         this.animate();
         this.setupCraftingListeners();
         this.updateInventoryUI();
@@ -2702,7 +3217,17 @@ class TerrainScene {
         this.berryMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000, roughness: 0.3, metalness: 0.5 });
         this.berryMaterial.onBeforeCompile = applyWind;
 
-        this.stoneMaterial = new THREE.MeshStandardMaterial({ color: 0x9999aa, roughness: 0.9, flatShading: true });
+        const stoneTex = this.generator.createTexture('#8f949f', '#5f6673', 0.95);
+        stoneTex.wrapS = stoneTex.wrapT = THREE.RepeatWrapping;
+        stoneTex.repeat.set(1.6, 1.6);
+        this.stoneMaterial = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            map: stoneTex,
+            roughness: 0.96,
+            metalness: 0.02,
+            flatShading: false,
+            side: THREE.DoubleSide
+        });
 
         // Static material for logs (no wind)
         this.logMaterial = new THREE.MeshStandardMaterial({ color: 0x5d4037, roughness: 0.9, flatShading: true });
@@ -2853,7 +3378,13 @@ class TerrainScene {
             }
             if (e.code === 'KeyC') {
                 if (this.cookingOpen) this.toggleCooking();
+                if (this.inventoryOpen) this.toggleInventory(false);
                 this.toggleCrafting();
+            }
+            if (e.code === 'KeyI') {
+                if (this.craftingOpen) this.toggleCrafting();
+                if (this.cookingOpen) this.toggleCooking();
+                this.toggleInventory();
             }
             if (e.code === 'KeyX') {
                 this.consumeBestFood();
@@ -2874,7 +3405,7 @@ class TerrainScene {
         });
 
         window.addEventListener('mousedown', (e) => {
-            if (e.button === 0 && this.controls.locked && !this.craftingOpen && !this.cookingOpen) {
+            if (e.button === 0 && this.controls.locked && !this.craftingOpen && !this.cookingOpen && !this.inventoryOpen) {
                 this.handleAction();
             }
         });
@@ -2909,29 +3440,40 @@ class TerrainScene {
 
         if (mesh.userData.isDrop) {
             if (mesh.userData.dropType === 'meat') {
-                this.addInventoryItem('meat', 1);
-                itemName = "Raw Meat";
+                const added = this.addInventoryItem('meat', 1);
+                if (added > 0) {
+                    itemName = "Raw Meat";
+                    picked = true;
+                }
             } else if (mesh.userData.dropType === 'leather') {
-                this.inventory.leather++;
-                itemName = "Leather";
+                const added = this.addInventoryItem('leather', 1);
+                if (added > 0) {
+                    itemName = "Leather";
+                    picked = true;
+                }
             }
 
-            this.scene.remove(mesh);
-            this.droppedItems = this.droppedItems.filter(item => item !== mesh);
+            if (picked) {
+                this.scene.remove(mesh);
+                this.droppedItems = this.droppedItems.filter(item => item !== mesh);
 
-            if (mesh.geometry) mesh.geometry.dispose();
-            picked = true;
+                if (mesh.geometry) mesh.geometry.dispose();
+            } else {
+                this.showPickupFeedback("Inventory Full!", true);
+            }
         } else {
             const matrix = new THREE.Matrix4();
 
             if (mesh.userData.isBranch) {
-                mesh.getMatrixAt(index, matrix);
-                matrix.scale(new THREE.Vector3(0, 0, 0));
-                mesh.setMatrixAt(index, matrix);
-                mesh.instanceMatrix.needsUpdate = true;
-                this.inventory.branches++;
-                picked = true;
-                itemName = "Branch";
+                const added = this.addInventoryItem('branches', 1);
+                if (added > 0) {
+                    mesh.getMatrixAt(index, matrix);
+                    matrix.scale(new THREE.Vector3(0, 0, 0));
+                    mesh.setMatrixAt(index, matrix);
+                    mesh.instanceMatrix.needsUpdate = true;
+                    picked = true;
+                    itemName = "Branch";
+                }
             } else if (mesh.userData.isBush) {
                 const berryMesh = mesh.userData.berryMesh;
                 if (berryMesh) {
@@ -2940,56 +3482,78 @@ class TerrainScene {
                     const s = new THREE.Vector3();
                     matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
                     if (s.length() > 0.001) {
-                        matrix.scale(new THREE.Vector3(0, 0, 0));
-                        berryMesh.setMatrixAt(index, matrix);
-                        berryMesh.instanceMatrix.needsUpdate = true;
-                        this.addInventoryItem('berries', 5);
-                        picked = true;
-                        itemName = "Berries";
+                        const added = this.addInventoryItem('berries', 5);
+                        if (added > 0) {
+                            matrix.scale(new THREE.Vector3(0, 0, 0));
+                            berryMesh.setMatrixAt(index, matrix);
+                            berryMesh.instanceMatrix.needsUpdate = true;
+                            picked = true;
+                            itemName = "Berries";
+                        }
                     }
                 }
             } else if (mesh.userData.isStone) {
-                mesh.getMatrixAt(index, matrix);
-                matrix.scale(new THREE.Vector3(0, 0, 0));
-                mesh.setMatrixAt(index, matrix);
-                mesh.instanceMatrix.needsUpdate = true;
-                this.inventory.stones++;
-                picked = true;
-                itemName = "Stone";
+                const added = this.addInventoryItem('stones', 1);
+                if (added > 0) {
+                    mesh.getMatrixAt(index, matrix);
+                    matrix.scale(new THREE.Vector3(0, 0, 0));
+                    mesh.setMatrixAt(index, matrix);
+                    mesh.instanceMatrix.needsUpdate = true;
+                    picked = true;
+                    itemName = "Stone";
+                }
             } else if (mesh.userData.isLog) {
-                mesh.getMatrixAt(index, matrix);
-                matrix.scale(new THREE.Vector3(0, 0, 0));
-                mesh.setMatrixAt(index, matrix);
-                mesh.instanceMatrix.needsUpdate = true;
-                this.inventory.logs++;
-                picked = true;
-                itemName = "Log";
+                const added = this.addInventoryItem('logs', 1);
+                if (added > 0) {
+                    mesh.getMatrixAt(index, matrix);
+                    matrix.scale(new THREE.Vector3(0, 0, 0));
+                    mesh.setMatrixAt(index, matrix);
+                    mesh.instanceMatrix.needsUpdate = true;
+                    picked = true;
+                    itemName = "Log";
+                }
             } else if (mesh.userData.isMushroom) {
-                mesh.getMatrixAt(index, matrix);
-                matrix.scale(new THREE.Vector3(0, 0, 0));
-                mesh.setMatrixAt(index, matrix);
-                mesh.instanceMatrix.needsUpdate = true;
-
-                const capMesh = mesh.userData.capMesh;
-                if (capMesh) {
-                    capMesh.setMatrixAt(index, matrix);
-                    capMesh.instanceMatrix.needsUpdate = true;
-                }
-
                 if (mesh.userData.mushroomType === 'red') {
-                    this.addInventoryItem('redMushrooms', 1);
-                    itemName = "Red Mushroom";
+                    const added = this.addInventoryItem('redMushrooms', 1);
+                    if (added > 0) {
+                        mesh.getMatrixAt(index, matrix);
+                        matrix.scale(new THREE.Vector3(0, 0, 0));
+                        mesh.setMatrixAt(index, matrix);
+                        mesh.instanceMatrix.needsUpdate = true;
+
+                        const capMesh = mesh.userData.capMesh;
+                        if (capMesh) {
+                            capMesh.setMatrixAt(index, matrix);
+                            capMesh.instanceMatrix.needsUpdate = true;
+                        }
+                        itemName = "Red Mushroom";
+                        picked = true;
+                    }
                 } else {
-                    this.addInventoryItem('yellowMushrooms', 1);
-                    itemName = "Yellow Mushroom";
+                    const added = this.addInventoryItem('yellowMushrooms', 1);
+                    if (added > 0) {
+                        mesh.getMatrixAt(index, matrix);
+                        matrix.scale(new THREE.Vector3(0, 0, 0));
+                        mesh.setMatrixAt(index, matrix);
+                        mesh.instanceMatrix.needsUpdate = true;
+
+                        const capMesh = mesh.userData.capMesh;
+                        if (capMesh) {
+                            capMesh.setMatrixAt(index, matrix);
+                            capMesh.instanceMatrix.needsUpdate = true;
+                        }
+                        itemName = "Yellow Mushroom";
+                        picked = true;
+                    }
                 }
-                picked = true;
             }
         }
 
         if (picked) {
             this.updateInventoryUI();
             this.showPickupFeedback(itemName);
+        } else if (!mesh.userData.isDrop) {
+            this.showPickupFeedback("Inventory Full!", true);
         }
 
         this.focusedItem = null;
@@ -3020,42 +3584,281 @@ class TerrainScene {
         }
     }
 
+    spawnSkeletonWarriors(count = 20) {
+        this.gltfLoader = this.gltfLoader || new GLTFLoader();
+
+        if (this.skeletonWarriors.length > 0) {
+            this.skeletonWarriors.forEach((skeleton) => skeleton?.dispose?.());
+            this.skeletonWarriors = [];
+        }
+
+        const spawnCenter = this.playerSpawnPoint.clone();
+        const modelPath = 'assets/models/skeleton_warrior.glb';
+
+        this.gltfLoader.load(
+            modelPath,
+            (gltf) => {
+                const template = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+                const animations = gltf.animations || [];
+                if (!template) {
+                    console.warn('Skeleton model loaded but scene root missing:', modelPath);
+                    return;
+                }
+
+                let spawned = 0;
+                let attempts = 0;
+                const maxAttempts = Math.max(count * 20, 120);
+
+                while (spawned < count && attempts < maxAttempts) {
+                    attempts++;
+                    const angle = Math.random() * Math.PI * 2;
+                    const dist = 120 + Math.random() * 420;
+                    const x = spawnCenter.x + Math.cos(angle) * dist;
+                    const z = spawnCenter.z + Math.sin(angle) * dist;
+                    const y = this.getTerrainHeightAtPosition(x, z);
+
+                    if (y <= CONFIG.terrain.waterLevel + 2.0) continue;
+
+                    const skeleton = new SkeletonWarrior(
+                        this.scene,
+                        this.generator,
+                        new THREE.Vector3(x, y, z),
+                        this,
+                        template,
+                        animations,
+                        spawnCenter
+                    );
+
+                    this.skeletonWarriors.push(skeleton);
+                    spawned++;
+                }
+
+                console.log(`Skeleton warriors spawned: ${this.skeletonWarriors.length}/${count}`);
+            },
+            undefined,
+            (error) => {
+                console.warn('Failed to load skeleton warrior model:', modelPath, error);
+            }
+        );
+    }
+
+    getItemCount(itemKey) {
+        return this.inventory[itemKey] || 0;
+    }
+
+    getItemDef(itemKey) {
+        return this.itemDefinitions[itemKey] || { icon: '??', description: 'No description.', stackSize: 99, bindable: false };
+    }
+
+    isFoodItem(itemKey) {
+        return !!this.foodEffects[itemKey];
+    }
+
+    isActionbarBindableItem(itemKey) {
+        return this.isFoodItem(itemKey) || !!this.getItemDef(itemKey)?.bindable;
+    }
+
+    findFirstEmptyInventorySlot() {
+        return this.inventorySlots.findIndex(slot => slot === null);
+    }
+
+    findInventoryStackWithSpace(itemKey) {
+        const stackSize = this.getItemDef(itemKey).stackSize ?? 99;
+        for (let i = 0; i < this.inventorySlots.length; i++) {
+            const slot = this.inventorySlots[i];
+            if (slot && slot.kind === 'stack' && slot.itemKey === itemKey && slot.count < stackSize) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    addStackToInventorySlots(itemKey, amount) {
+        if (amount <= 0) return 0;
+        let remaining = amount;
+        const stackSize = this.getItemDef(itemKey).stackSize ?? 99;
+
+        while (remaining > 0) {
+            const slotIndex = this.findInventoryStackWithSpace(itemKey);
+            if (slotIndex === -1) break;
+            const slot = this.inventorySlots[slotIndex];
+            const add = Math.min(remaining, stackSize - slot.count);
+            slot.count += add;
+            remaining -= add;
+        }
+
+        while (remaining > 0) {
+            const empty = this.findFirstEmptyInventorySlot();
+            if (empty === -1) break;
+            const add = Math.min(remaining, stackSize);
+            this.inventorySlots[empty] = { kind: 'stack', itemKey, count: add };
+            remaining -= add;
+        }
+
+        return amount - remaining;
+    }
+
+    removeStackFromInventorySlots(itemKey, amount) {
+        if (amount <= 0) return 0;
+        let remaining = amount;
+
+        for (let i = 0; i < this.inventorySlots.length && remaining > 0; i++) {
+            const slot = this.inventorySlots[i];
+            if (!slot || slot.kind !== 'stack' || slot.itemKey !== itemKey) continue;
+
+            const take = Math.min(remaining, slot.count);
+            slot.count -= take;
+            remaining -= take;
+            if (slot.count <= 0) this.inventorySlots[i] = null;
+        }
+
+        return amount - remaining;
+    }
+
+    addToolToInventorySlots(toolId) {
+        const empty = this.findFirstEmptyInventorySlot();
+        if (empty === -1) return -1;
+        this.inventorySlots[empty] = { kind: 'tool', toolId };
+        return empty;
+    }
+
+    removeToolFromInventorySlots(toolId) {
+        for (let i = 0; i < this.inventorySlots.length; i++) {
+            const slot = this.inventorySlots[i];
+            if (slot && slot.kind === 'tool' && slot.toolId === toolId) {
+                this.inventorySlots[i] = null;
+            }
+        }
+    }
+
     getToolById(toolId) {
         return this.inventory.tools.find(t => t.id === toolId) || null;
     }
 
+    getToolShortName(type) {
+        return this.toolDefinitions[type]?.shortName || type;
+    }
+
+    getToolIcon(type) {
+        return this.toolDefinitions[type]?.icon || 'TL';
+    }
+
+    getToolIconPath(type) {
+        return this.toolDefinitions[type]?.iconPath || '';
+    }
+
+    getToolDescription(type) {
+        return this.toolDefinitions[type]?.description || 'Tool';
+    }
+
+    applyIconToBadge(holder, iconPath, fallbackText) {
+        if (!holder) return;
+        holder.textContent = '';
+        if (!iconPath) {
+            holder.textContent = fallbackText;
+            return;
+        }
+
+        const img = document.createElement('img');
+        img.src = iconPath;
+        img.alt = fallbackText;
+        img.style.width = '16px';
+        img.style.height = '16px';
+        img.style.objectFit = 'contain';
+        img.style.display = 'block';
+        img.style.margin = '0 auto';
+        img.draggable = false;
+        img.addEventListener('error', () => {
+            holder.textContent = fallbackText;
+        });
+        holder.appendChild(img);
+    }
+
     getActiveTool() {
-        const toolId = this.actionbarSlots[this.activeSlotIndex];
-        if (toolId === null || toolId === undefined) return null;
-        return this.getToolById(toolId);
+        const entry = this.actionbarSlots[this.activeSlotIndex];
+        if (!entry || entry.kind !== 'tool') return null;
+        return this.getToolById(entry.toolId);
     }
 
     isChopTool(tool) {
         return !!tool && tool.type === 'Stone Axe';
     }
 
-    getToolShortName(type) {
-        if (type === 'Stone Axe') return 'Axe';
-        if (type === 'Stone Club') return 'Club';
-        return type;
+    isActionbarEntryValid(entry) {
+        if (!entry) return false;
+        if (entry.kind === 'tool') return !!this.getToolById(entry.toolId);
+        if (entry.kind === 'item') return this.getItemCount(entry.itemKey) > 0;
+        return false;
+    }
+
+    makeActionbarEntryFromInventorySlot(slotIndex) {
+        const slot = this.inventorySlots[slotIndex];
+        if (!slot) return null;
+
+        if (slot.kind === 'tool') {
+            const tool = this.getToolById(slot.toolId);
+            if (!tool) return null;
+            return { kind: 'tool', toolId: tool.id };
+        }
+
+        if (slot.kind === 'stack') {
+            if (!this.isActionbarBindableItem(slot.itemKey)) return null;
+            return { kind: 'item', itemKey: slot.itemKey };
+        }
+
+        return null;
+    }
+
+    readDragPayload(event) {
+        const raw = event.dataTransfer?.getData('application/x-surv-drag')
+            || event.dataTransfer?.getData('text/plain')
+            || '';
+        if (!raw) return null;
+
+        try {
+            return JSON.parse(raw);
+        } catch {
+            // Legacy actionbar drag data could be plain index.
+            const idx = parseInt(raw, 10);
+            if (!Number.isNaN(idx)) return { source: 'actionbar', slotIndex: idx };
+            return null;
+        }
     }
 
     activateActionbarSlot(index) {
         if (index < 0 || index >= this.actionbarSlots.length) return;
+
         this.activeSlotIndex = index;
+        const entry = this.actionbarSlots[index];
+
+        if (entry && entry.kind === 'item') {
+            if (this.isFoodItem(entry.itemKey)) {
+                this.consumeFood(entry.itemKey);
+            } else {
+                this.showPickupFeedback('This item cannot be used from the actionbar.', true);
+            }
+        }
+
         this.updateActionbarUI();
         this.updateViewmodel();
     }
 
-    addToolToInventory(type, durability) {
-        const tool = { id: this.nextToolId++, type, durability };
+    addToolToInventory(type, durability = null) {
+        const maxDurability = this.toolDefinitions[type]?.maxDurability ?? 100;
+        const tool = { id: this.nextToolId++, type, durability: durability ?? maxDurability };
+        const slotIndex = this.addToolToInventorySlots(tool.id);
+        if (slotIndex === -1) {
+            return null;
+        }
+
         this.inventory.tools.push(tool);
 
-        const emptySlot = this.actionbarSlots.findIndex(slot => slot === null);
-        if (emptySlot !== -1) {
-            this.actionbarSlots[emptySlot] = tool.id;
-            if (!this.getActiveTool()) {
-                this.activeSlotIndex = emptySlot;
+        const emptyAction = this.actionbarSlots.findIndex(slot => slot === null);
+        if (emptyAction !== -1) {
+            this.actionbarSlots[emptyAction] = { kind: 'tool', toolId: tool.id };
+            const activeEntry = this.actionbarSlots[this.activeSlotIndex];
+            if (!activeEntry || activeEntry.kind !== 'tool') {
+                this.activeSlotIndex = emptyAction;
             }
         }
 
@@ -3064,8 +3867,10 @@ class TerrainScene {
 
     removeToolById(toolId) {
         this.inventory.tools = this.inventory.tools.filter(t => t.id !== toolId);
+        this.removeToolFromInventorySlots(toolId);
         for (let i = 0; i < this.actionbarSlots.length; i++) {
-            if (this.actionbarSlots[i] === toolId) {
+            const entry = this.actionbarSlots[i];
+            if (entry && entry.kind === 'tool' && entry.toolId === toolId) {
                 this.actionbarSlots[i] = null;
             }
         }
@@ -3111,12 +3916,14 @@ class TerrainScene {
 
             slot.draggable = true;
             slot.addEventListener('dragstart', (e) => {
-                if (this.actionbarSlots[i] === null) {
+                if (!this.actionbarSlots[i]) {
                     e.preventDefault();
                     return;
                 }
+                const payload = JSON.stringify({ source: 'actionbar', slotIndex: i });
                 if (e.dataTransfer) {
-                    e.dataTransfer.setData('text/plain', String(i));
+                    e.dataTransfer.setData('application/x-surv-drag', payload);
+                    e.dataTransfer.setData('text/plain', payload);
                     e.dataTransfer.effectAllowed = 'move';
                 }
                 slot.style.opacity = '0.55';
@@ -3137,15 +3944,27 @@ class TerrainScene {
                 e.stopPropagation();
                 slot.style.outline = '';
 
-                const fromIndex = parseInt(e.dataTransfer?.getData('text/plain') ?? '', 10);
-                if (Number.isNaN(fromIndex) || fromIndex < 0 || fromIndex > 8 || fromIndex === i) return;
+                const payload = this.readDragPayload(e);
+                if (!payload) return;
 
-                const tmp = this.actionbarSlots[fromIndex];
-                this.actionbarSlots[fromIndex] = this.actionbarSlots[i];
-                this.actionbarSlots[i] = tmp;
+                if (payload.source === 'actionbar') {
+                    const fromIndex = payload.slotIndex;
+                    if (fromIndex < 0 || fromIndex > 8 || fromIndex === i) return;
 
-                if (this.activeSlotIndex === fromIndex) this.activeSlotIndex = i;
-                else if (this.activeSlotIndex === i) this.activeSlotIndex = fromIndex;
+                    const tmp = this.actionbarSlots[fromIndex];
+                    this.actionbarSlots[fromIndex] = this.actionbarSlots[i];
+                    this.actionbarSlots[i] = tmp;
+
+                    if (this.activeSlotIndex === fromIndex) this.activeSlotIndex = i;
+                    else if (this.activeSlotIndex === i) this.activeSlotIndex = fromIndex;
+                } else if (payload.source === 'inventory') {
+                    const entry = this.makeActionbarEntryFromInventorySlot(payload.slotIndex);
+                    if (!entry) {
+                        this.showPickupFeedback('Only food and tools can be assigned.', true);
+                        return;
+                    }
+                    this.actionbarSlots[i] = entry;
+                }
 
                 this.updateActionbarUI();
                 this.updateViewmodel();
@@ -3162,17 +3981,16 @@ class TerrainScene {
     updateActionbarUI() {
         if (!this.actionbarSlotElements || this.actionbarSlotElements.length === 0) return;
 
-        const validIds = new Set(this.inventory.tools.map(t => t.id));
         for (let i = 0; i < this.actionbarSlots.length; i++) {
-            const toolId = this.actionbarSlots[i];
-            if (toolId !== null && !validIds.has(toolId)) {
+            const entry = this.actionbarSlots[i];
+            if (entry && !this.isActionbarEntryValid(entry)) {
                 this.actionbarSlots[i] = null;
             }
         }
 
         for (let i = 0; i < this.actionbarSlotElements.length; i++) {
             const slot = this.actionbarSlotElements[i];
-            const tool = this.getToolById(this.actionbarSlots[i]);
+            const entry = this.actionbarSlots[i];
             const selected = i === this.activeSlotIndex;
 
             slot.style.border = selected ? '2px solid #ffd54f' : '2px solid rgba(255,255,255,0.35)';
@@ -3189,28 +4007,52 @@ class TerrainScene {
             hotkey.style.fontFamily = 'monospace';
             slot.appendChild(hotkey);
 
-            if (tool) {
-                const label = document.createElement('div');
-                label.textContent = this.getToolShortName(tool.type);
-                label.style.position = 'absolute';
-                label.style.left = '50%';
-                label.style.top = '22px';
-                label.style.transform = 'translateX(-50%)';
-                label.style.fontSize = '12px';
-                label.style.fontWeight = '600';
-                label.style.color = 'white';
-                label.style.whiteSpace = 'nowrap';
-                slot.appendChild(label);
+            if (!entry) continue;
 
-                const durability = document.createElement('div');
-                durability.textContent = `${Math.max(0, Math.round(tool.durability))}%`;
-                durability.style.position = 'absolute';
-                durability.style.left = '50%';
-                durability.style.bottom = '5px';
-                durability.style.transform = 'translateX(-50%)';
-                durability.style.fontSize = '11px';
-                durability.style.color = 'rgba(255,255,255,0.9)';
-                slot.appendChild(durability);
+            const icon = document.createElement('div');
+            icon.style.position = 'absolute';
+            icon.style.left = '50%';
+            icon.style.top = '12px';
+            icon.style.transform = 'translateX(-50%)';
+            icon.style.fontSize = '12px';
+            icon.style.fontWeight = '700';
+            icon.style.padding = '2px 6px';
+            icon.style.borderRadius = '4px';
+            icon.style.background = 'rgba(255,255,255,0.2)';
+            icon.style.color = 'white';
+            slot.appendChild(icon);
+
+            const label = document.createElement('div');
+            label.style.position = 'absolute';
+            label.style.left = '50%';
+            label.style.top = '34px';
+            label.style.transform = 'translateX(-50%)';
+            label.style.fontSize = '11px';
+            label.style.fontWeight = '600';
+            label.style.color = 'white';
+            label.style.whiteSpace = 'nowrap';
+            slot.appendChild(label);
+
+            const detail = document.createElement('div');
+            detail.style.position = 'absolute';
+            detail.style.left = '50%';
+            detail.style.bottom = '4px';
+            detail.style.transform = 'translateX(-50%)';
+            detail.style.fontSize = '11px';
+            detail.style.color = 'rgba(255,255,255,0.9)';
+            slot.appendChild(detail);
+
+            if (entry.kind === 'tool') {
+                const tool = this.getToolById(entry.toolId);
+                if (!tool) continue;
+                this.applyIconToBadge(icon, this.getToolIconPath(tool.type), this.getToolIcon(tool.type));
+                label.textContent = this.getToolShortName(tool.type);
+                detail.textContent = `${Math.max(0, Math.round(tool.durability))}%`;
+            } else if (entry.kind === 'item') {
+                const def = this.getItemDef(entry.itemKey);
+                this.applyIconToBadge(icon, def.iconPath || '', def.icon || 'IT');
+                label.textContent = this.getItemLabel(entry.itemKey);
+                detail.textContent = `x${this.getItemCount(entry.itemKey)}`;
             }
         }
     }
@@ -3236,7 +4078,7 @@ class TerrainScene {
             const dist = 1.0 + Math.random() * 2.5;
             const x = centerPos.x + Math.cos(angle) * dist;
             const z = centerPos.z + Math.sin(angle) * dist;
-            const y = this.generator.getElevation(x, z) + 3.0 + Math.random() * 1.5;
+            const y = this.getTerrainHeightAtPosition(x, z) + 3.0 + Math.random() * 1.5;
             this.spawnDropItem(isLeather ? 'leather' : 'meat', new THREE.Vector3(x, y, z));
         }
     }
@@ -3248,7 +4090,8 @@ class TerrainScene {
             : new THREE.Mesh(new THREE.BoxGeometry(0.57, 0.42, 0.42), this.meatDropMaterial);
 
         mesh.position.copy(pos);
-        mesh.rotation.y = Math.random() * Math.PI * 2;
+        const yaw = Math.random() * Math.PI * 2;
+        mesh.rotation.y = yaw;
         if (type === 'leather') {
             // Keep leather flat so corners cannot clip through terrain.
             mesh.rotation.x = 0;
@@ -3260,9 +4103,9 @@ class TerrainScene {
         mesh.userData.isDrop = true;
         mesh.userData.dropType = type;
         mesh.userData.pickupName = type === 'leather' ? 'Leather' : 'Raw Meat';
-        mesh.userData.dropHalfSize = type === 'leather'
-            ? new THREE.Vector3(0.4125, 0.06, 0.3)
-            : new THREE.Vector3(0.285, 0.21, 0.21);
+        mesh.userData.dropYaw = yaw;
+        mesh.userData.dropSupportLocal = this.getGeometryBottomSupportPoints(mesh.geometry);
+        mesh.userData.dropSupportMargin = type === 'leather' ? 0.018 : 0.024;
         mesh.userData.dropVelY = 0;
         mesh.userData.dropGrounded = false;
 
@@ -3277,33 +4120,64 @@ class TerrainScene {
 
     getDropSupportY(mesh) {
         if (!mesh) return 0;
-        const half = mesh.userData.dropHalfSize;
-        if (!half) {
-            const groundY = this.generator.getElevation(mesh.position.x, mesh.position.z);
-            return groundY + 0.2;
+        const points = mesh.userData.dropSupportLocal;
+        if (!points || points.length === 0) {
+            return this.getTerrainHeightAtPosition(mesh.position.x, mesh.position.z) + 0.12;
         }
 
-        const c = Math.cos(mesh.rotation.y);
-        const s = Math.sin(mesh.rotation.y);
-        let maxGround = -Infinity;
-        const probeHalfX = half.x + 0.08;
-        const probeHalfZ = half.z + 0.08;
-
-        // Probe dense footprint grid and sit above the highest sampled ground.
-        for (let ix = -3; ix <= 3; ix++) {
-            for (let iz = -3; iz <= 3; iz++) {
-                const ox = (ix / 3) * probeHalfX;
-                const oz = (iz / 3) * probeHalfZ;
-                // Use the same Y-axis rotation orientation as three.js applyAxisAngle.
-                const wx = mesh.position.x + ox * c + oz * s;
-                const wz = mesh.position.z - ox * s + oz * c;
-                const gh = this.generator.getElevation(wx, wz);
-                if (gh > maxGround) maxGround = gh;
-            }
+        const margin = mesh.userData.dropSupportMargin ?? 0.02;
+        const rotated = this.tmpDropSupportVec;
+        let supportY = -Infinity;
+        for (let i = 0; i < points.length; i++) {
+            rotated.copy(points[i]).multiply(mesh.scale).applyQuaternion(mesh.quaternion);
+            const wx = mesh.position.x + rotated.x;
+            const wz = mesh.position.z + rotated.z;
+            const gh = this.getTerrainHeightAtPosition(wx, wz);
+            const cornerSupportY = gh + margin - rotated.y;
+            if (cornerSupportY > supportY) supportY = cornerSupportY;
         }
+        return supportY;
+    }
 
-        const safetyMargin = 0.12;
-        return maxGround + half.y + safetyMargin;
+    getGeometryBottomSupportPoints(geometry) {
+        if (!geometry.boundingBox) geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        const min = bb.min;
+        const max = bb.max;
+        const midX = (min.x + max.x) * 0.5;
+        const midZ = (min.z + max.z) * 0.5;
+        return [
+            new THREE.Vector3(min.x, min.y, min.z),
+            new THREE.Vector3(min.x, min.y, max.z),
+            new THREE.Vector3(max.x, min.y, min.z),
+            new THREE.Vector3(max.x, min.y, max.z),
+            new THREE.Vector3(midX, min.y, midZ)
+        ];
+    }
+
+    getTerrainNormalAtPosition(x, z, step = 0.45, outNormal = null) {
+        const hL = this.getTerrainHeightAtPosition(x - step, z);
+        const hR = this.getTerrainHeightAtPosition(x + step, z);
+        const hD = this.getTerrainHeightAtPosition(x, z - step);
+        const hU = this.getTerrainHeightAtPosition(x, z + step);
+        const normal = outNormal || new THREE.Vector3();
+        normal.set(hL - hR, step * 2, hD - hU);
+        if (normal.lengthSq() < 1e-8) {
+            normal.set(0, 1, 0);
+            return normal;
+        }
+        normal.normalize();
+        if (normal.y < 0) normal.multiplyScalar(-1);
+        return normal;
+    }
+
+    alignDropToSlope(mesh) {
+        if (!mesh) return;
+        const yaw = mesh.userData.dropYaw ?? mesh.rotation.y;
+        const normal = this.getTerrainNormalAtPosition(mesh.position.x, mesh.position.z, 0.45, this.tmpDropNormal);
+        const yawQuat = this.tmpDropYawQuat.setFromAxisAngle(this.tmpDropUp, yaw);
+        const slopeQuat = this.tmpDropSlopeQuat.setFromUnitVectors(this.tmpDropUp, normal);
+        mesh.quaternion.multiplyQuaternions(slopeQuat, yawQuat);
     }
 
     keepDropAboveGround(mesh) {
@@ -3320,10 +4194,18 @@ class TerrainScene {
             }
 
             const supportY = this.getDropSupportY(mesh);
+            if (mesh.userData.dropGrounded) {
+                mesh.position.y = supportY;
+                continue;
+            }
+
             if (mesh.position.y <= supportY) {
+                this.alignDropToSlope(mesh);
+                const snappedSupportY = this.getDropSupportY(mesh);
                 mesh.position.y = supportY;
                 mesh.userData.dropVelY = 0;
                 mesh.userData.dropGrounded = true;
+                mesh.position.y = snappedSupportY;
             }
         }
     }
@@ -3371,7 +4253,7 @@ class TerrainScene {
     }
 
     handleAction() {
-        if (this.cookingOpen) return;
+        if (this.cookingOpen || this.inventoryOpen) return;
         if (this.placementMode) {
             this.placeObject();
             return;
@@ -3587,78 +4469,95 @@ class TerrainScene {
     createViewmodel() {
         this.viewmodelGroup = new THREE.Group();
         this.camera.add(this.viewmodelGroup); // Attach to camera
+        this.gltfLoader = this.gltfLoader || new GLTFLoader();
 
-        // Stone Axe Model
-        const axe = new THREE.Group();
+        this.axeModel = this.createToolViewmodelGroup('Stone Axe');
+        this.clubModel = this.createToolViewmodelGroup('Stone Club');
+        this.viewmodelGroup.add(this.axeModel, this.clubModel);
 
-        // Handle
-        const handleGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.2, 8);
-        const handleMat = new THREE.MeshStandardMaterial({ color: 0x5d4037, roughness: 0.9 });
-        const handle = new THREE.Mesh(handleGeo, handleMat);
-        handle.rotation.z = Math.PI * 0.1;
-        axe.add(handle);
-
-        // Head - sharp wedge, oriented so the blade faces away from the player
-        const headShape = new THREE.Shape();
-        headShape.moveTo(-0.14, 0.12);
-        headShape.lineTo(0.08, 0.14);
-        headShape.lineTo(0.34, 0.0); // acute sharp edge
-        headShape.lineTo(0.08, -0.14);
-        headShape.lineTo(-0.14, -0.12);
-        headShape.lineTo(-0.14, 0.12);
-
-        const extrudeSettings = { depth: 0.12, bevelEnabled: true, bevelThickness: 0.006, bevelSize: 0.008, bevelSegments: 2 };
-        const headGeo = new THREE.ExtrudeGeometry(headShape, extrudeSettings);
-        headGeo.translate(0, 0, -0.06); // Center extrusion
-
-        const headMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.6, flatShading: true });
-        const head = new THREE.Mesh(headGeo, headMat);
-        head.position.set(0.1, 0.45, 0);
-        head.rotation.y = Math.PI; // flip to point blade away from camera
-        head.rotation.z = -Math.PI * 0.08;
-        axe.add(head);
-
-        // Positioning in front of camera
-        axe.position.set(0.4, -0.5, -0.8);
-        axe.rotation.set(0, -Math.PI * 0.5, 0.2);
-        axe.userData.idlePos = axe.position.clone();
-
-        this.axeModel = axe;
-        this.viewmodelGroup.add(axe);
-
-        // Stone Club Model
-        const club = new THREE.Group();
-
-        const clubHandleGeo = new THREE.CylinderGeometry(0.055, 0.07, 1.2, 8);
-        const clubHandleMat = new THREE.MeshStandardMaterial({ color: 0x6d4c41, roughness: 0.92 });
-        const clubHandle = new THREE.Mesh(clubHandleGeo, clubHandleMat);
-        clubHandle.rotation.z = Math.PI * 0.08;
-        club.add(clubHandle);
-
-        const clubHeadMat = new THREE.MeshStandardMaterial({ color: 0x8a8a8a, roughness: 0.75, flatShading: true });
-        const clubHeadCore = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), clubHeadMat);
-        clubHeadCore.position.set(0.08, 0.48, 0);
-        club.add(clubHeadCore);
-
-        const clubBump1 = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), clubHeadMat);
-        clubBump1.position.set(0.18, 0.52, 0.03);
-        club.add(clubBump1);
-
-        const clubBump2 = new THREE.Mesh(new THREE.SphereGeometry(0.085, 8, 6), clubHeadMat);
-        clubBump2.position.set(0.03, 0.56, -0.08);
-        club.add(clubBump2);
-
-        const clubBump3 = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), clubHeadMat);
-        clubBump3.position.set(0.02, 0.44, 0.09);
-        club.add(clubBump3);
-
-        club.position.set(0.4, -0.5, -0.8);
-        club.rotation.set(0, -Math.PI * 0.5, 0.2);
-        club.userData.idlePos = club.position.clone();
-
-        this.clubModel = club;
-        this.viewmodelGroup.add(club);
+        this.loadToolViewmodelAsset('Stone Axe', this.axeModel);
+        this.loadToolViewmodelAsset('Stone Club', this.clubModel);
         this.updateViewmodel();
+    }
+
+    createToolViewmodelGroup(toolType) {
+        const group = new THREE.Group();
+        const vm = this.toolDefinitions[toolType]?.viewmodel || {};
+        const holdPos = vm.holdPosition || [0.42, -0.58, -0.95];
+        const holdRot = vm.holdRotation || [0.0, -Math.PI * 0.5, 0.0];
+        group.position.set(holdPos[0], holdPos[1], holdPos[2]);
+        group.rotation.set(holdRot[0], holdRot[1], holdRot[2]);
+        group.userData.idlePos = group.position.clone();
+        group.userData.toolType = toolType;
+
+        // Minimal placeholder while GLTF loads.
+        const placeholderMat = new THREE.MeshStandardMaterial({ color: 0x666666, roughness: 0.9, flatShading: true });
+        const placeholder = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.5, 0.08), placeholderMat);
+        placeholder.position.set(0, 0.1, 0);
+        group.add(placeholder);
+        return group;
+    }
+
+    clearToolGroup(group) {
+        while (group.children.length > 0) {
+            const child = group.children[0];
+            group.remove(child);
+            child.traverse((node) => {
+                if (node.isMesh) {
+                    if (node.geometry) node.geometry.dispose();
+                    if (Array.isArray(node.material)) {
+                        node.material.forEach(mat => mat?.dispose && mat.dispose());
+                    } else if (node.material?.dispose) {
+                        node.material.dispose();
+                    }
+                }
+            });
+        }
+    }
+
+    loadToolViewmodelAsset(toolType, holderGroup) {
+        const def = this.toolDefinitions[toolType];
+        if (!def?.modelPath || !holderGroup || !this.gltfLoader) return;
+        const vm = def.viewmodel || {};
+
+        this.gltfLoader.load(
+            def.modelPath,
+            (gltf) => {
+                const root = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+                if (!root) return;
+
+                this.clearToolGroup(holderGroup);
+
+                root.traverse((node) => {
+                    if (!node.isMesh) return;
+                    node.castShadow = false;
+                    node.receiveShadow = false;
+                    node.frustumCulled = false;
+                });
+
+                const modelPos = vm.modelPosition || [0, 0, 0];
+                const modelRot = vm.modelRotation || [0, 0, 0];
+                const modelScale = vm.modelScale || [1, 1, 1];
+                const gripOffset = vm.gripOffset || [0, 0, 0];
+
+                const rig = new THREE.Group();
+                rig.position.set(modelPos[0], modelPos[1], modelPos[2]);
+                rig.rotation.set(modelRot[0], modelRot[1], modelRot[2]);
+                if (Array.isArray(modelScale)) {
+                    rig.scale.set(modelScale[0], modelScale[1], modelScale[2]);
+                } else {
+                    rig.scale.setScalar(modelScale);
+                }
+
+                root.position.set(gripOffset[0], gripOffset[1], gripOffset[2]);
+                rig.add(root);
+                holderGroup.add(rig);
+            },
+            undefined,
+            (error) => {
+                console.warn(`Failed to load ${toolType} GLTF: ${def.modelPath}`, error);
+            }
+        );
     }
 
     updateViewmodel() {
@@ -3678,112 +4577,81 @@ class TerrainScene {
         }
     }
 
-    craftStoneAxe() {
-        if (this.inventory.branches >= 1 && this.inventory.stones >= 2) {
-            this.inventory.branches -= 1;
-            this.inventory.stones -= 2;
-            this.addToolToInventory('Stone Axe', 100);
-            this.updateInventoryUI();
-            this.showPickupFeedback("Stone Axe");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
-        }
+    getCraftingRecipe(recipeId) {
+        return this.craftingRecipes.find(recipe => recipe.id === recipeId) || null;
     }
 
-    craftStoneClub() {
-        if (this.inventory.logs >= 1 && this.inventory.stones >= 1) {
-            this.inventory.logs -= 1;
-            this.inventory.stones -= 1;
-            this.addToolToInventory('Stone Club', 100);
-            this.updateInventoryUI();
-            this.showPickupFeedback("Stone Club");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
-        }
-    }
+    craftFromRecipe(recipeId) {
+        const recipe = this.getCraftingRecipe(recipeId);
+        if (!recipe) return false;
 
-    craftFirepit() {
-        if (this.inventory.logs >= 5 && this.inventory.stones >= 2) {
-            this.inventory.logs -= 5;
-            this.inventory.stones -= 2;
-            this.updateInventoryUI();
-            this.startPlacement('firepit');
-            this.toggleCrafting();
-            this.showPickupFeedback("Placing Firepit...");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
+        if (!this.hasIngredients(recipe.ingredients) || !this.consumeIngredients(recipe.ingredients)) {
+            this.showPickupFeedback("Missing Materials!", true);
+            return false;
         }
+
+        const restoreIngredients = () => {
+            for (const [itemKey, amount] of Object.entries(recipe.ingredients || {})) {
+                this.addInventoryItem(itemKey, amount);
+            }
+        };
+
+        const result = recipe.result || {};
+        if (result.kind === 'tool') {
+            const toolType = result.type;
+            const durability = result.durability ?? this.toolDefinitions[toolType]?.maxDurability ?? 100;
+            const tool = this.addToolToInventory(toolType, durability);
+            if (!tool) {
+                restoreIngredients();
+                this.showPickupFeedback("Inventory Full!", true);
+                return false;
+            }
+        } else if (result.kind === 'placement') {
+            this.startPlacement(result.placementType);
+            if (this.craftingOpen) this.toggleCrafting();
+        } else if (result.kind === 'items' && result.outputs) {
+            this.addRecipeOutputs(result.outputs);
+        }
+
+        this.updateInventoryUI();
+        this.showPickupFeedback(recipe.successFeedback || recipe.name, !!recipe.successFeedbackRaw);
+        return true;
     }
 
     setupCraftingListeners() {
-        const axeBtn = document.getElementById('btn-craft-axe');
-        if (axeBtn) axeBtn.onclick = () => this.craftStoneAxe();
+        for (const recipe of this.craftingRecipes) {
+            if (!recipe.buttonId) continue;
+            const btn = document.getElementById(recipe.buttonId);
+            if (btn) btn.onclick = () => this.craftFromRecipe(recipe.id);
+        }
+    }
 
-        const clubBtn = document.getElementById('btn-craft-club');
-        if (clubBtn) clubBtn.onclick = () => this.craftStoneClub();
+    craftStoneAxe() {
+        return this.craftFromRecipe('stone_axe');
+    }
 
-        const firepitBtn = document.getElementById('btn-craft-firepit');
-        if (firepitBtn) firepitBtn.onclick = () => this.craftFirepit();
+    craftStoneClub() {
+        return this.craftFromRecipe('stone_club');
+    }
 
-        const wallBtn = document.getElementById('btn-craft-wall');
-        if (wallBtn) wallBtn.onclick = () => this.craftWall();
-
-        const floorBtn = document.getElementById('btn-craft-floor');
-        if (floorBtn) floorBtn.onclick = () => this.craftFloor();
-
-        const roofBtn = document.getElementById('btn-craft-roof');
-        if (roofBtn) roofBtn.onclick = () => this.craftRoof();
-
-        const triWallBtn = document.getElementById('btn-craft-tri-wall');
-        if (triWallBtn) triWallBtn.onclick = () => this.craftTriWall();
+    craftFirepit() {
+        return this.craftFromRecipe('firepit');
     }
 
     craftTriWall() {
-        if (this.inventory.logs >= 1) {
-            this.inventory.logs -= 1;
-            this.updateInventoryUI();
-            this.startPlacement('tri_wall');
-            this.toggleCrafting();
-            this.showPickupFeedback("Placing Triangle Wall... (R to rotate)");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
-        }
+        return this.craftFromRecipe('tri_wall');
     }
 
     craftRoof() {
-        if (this.inventory.logs >= 2) {
-            this.inventory.logs -= 2;
-            this.updateInventoryUI();
-            this.startPlacement('roof');
-            this.toggleCrafting();
-            this.showPickupFeedback("Placing Roof... (R to rotate)");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
-        }
+        return this.craftFromRecipe('roof');
     }
 
     craftFloor() {
-        if (this.inventory.logs >= 2) {
-            this.inventory.logs -= 2;
-            this.updateInventoryUI();
-            this.startPlacement('floor');
-            this.toggleCrafting();
-            this.showPickupFeedback("Placing Floor... (R to rotate)");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
-        }
+        return this.craftFromRecipe('floor');
     }
 
     craftWall() {
-        if (this.inventory.logs >= 2) {
-            this.inventory.logs -= 2;
-            this.updateInventoryUI();
-            this.startPlacement('wall');
-            this.toggleCrafting();
-            this.showPickupFeedback("Placing Wall... (R to rotate)");
-        } else {
-            this.showPickupFeedback("Missing Materials!");
-        }
+        return this.craftFromRecipe('wall');
     }
 
     startPlacement(type) {
@@ -3930,23 +4798,27 @@ class TerrainScene {
     }
 
     addInventoryItem(itemKey, amount = 1, shelfLifeOverride = null) {
+        if (amount <= 0) return 0;
         if (!(itemKey in this.inventory)) this.inventory[itemKey] = 0;
+        const inserted = this.addStackToInventorySlots(itemKey, amount);
+        if (inserted <= 0) return 0;
+
         const bucket = this.perishableItems[itemKey];
         const currentCount = this.inventory[itemKey];
-        if (bucket && amount > 0) {
+        if (bucket && inserted > 0) {
             const nowSec = performance.now() * 0.001;
             const shelfLife = shelfLifeOverride ?? this.perishableConfig[itemKey].shelfLife;
             let totalRemaining = 0;
             for (let i = 0; i < bucket.length; i++) {
                 totalRemaining += Math.max(0, bucket[i] - nowSec);
             }
-            const totalCount = currentCount + amount;
+            const totalCount = currentCount + inserted;
             const weightedRemaining = totalCount > 0
-                ? ((totalRemaining + shelfLife * amount) / totalCount)
+                ? ((totalRemaining + shelfLife * inserted) / totalCount)
                 : shelfLife;
 
             // Fresh pickups slightly improve the blended timer after weighted averaging.
-            const freshnessBonus = shelfLife * 0.04 * (amount / Math.max(1, totalCount));
+            const freshnessBonus = shelfLife * 0.04 * (inserted / Math.max(1, totalCount));
             const targetRemaining = Math.max(2, Math.min(shelfLife, weightedRemaining + freshnessBonus));
 
             bucket.length = 0;
@@ -3963,12 +4835,15 @@ class TerrainScene {
             }
             bucket.sort((a, b) => a - b);
         }
-        this.inventory[itemKey] += amount;
+        this.inventory[itemKey] += inserted;
+        return inserted;
     }
 
     consumeInventoryItem(itemKey, amount = 1) {
         const current = this.inventory[itemKey] || 0;
+        if (amount <= 0) return true;
         if (current < amount) return false;
+        if (this.removeStackFromInventorySlots(itemKey, amount) < amount) return false;
 
         this.inventory[itemKey] = current - amount;
         const bucket = this.perishableItems[itemKey];
@@ -3982,7 +4857,7 @@ class TerrainScene {
 
     hasIngredients(ingredients) {
         for (const [itemKey, amount] of Object.entries(ingredients)) {
-            if ((this.inventory[itemKey] || 0) < amount) return false;
+            if (this.getItemCount(itemKey) < amount) return false;
         }
         return true;
     }
@@ -4368,6 +5243,7 @@ class TerrainScene {
 
             if (spoiled > 0) {
                 this.inventory[itemKey] = Math.max(0, (this.inventory[itemKey] || 0) - spoiled);
+                this.removeStackFromInventorySlots(itemKey, spoiled);
                 spoiledParts.push(`${spoiled} ${this.getItemLabel(itemKey)}`);
             }
         }
@@ -4378,75 +5254,247 @@ class TerrainScene {
         }
     }
 
+    setupInventoryPanel() {
+        if (this.inventoryPanel && this.inventoryGridElement) return;
+
+        let panel = document.getElementById('inventory-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'inventory-panel';
+            panel.style.position = 'fixed';
+            panel.style.top = '50%';
+            panel.style.left = '50%';
+            panel.style.transform = 'translate(-50%, -50%)';
+            panel.style.display = 'none';
+            panel.style.background = 'rgba(0,0,0,0.9)';
+            panel.style.border = '1px solid rgba(255,255,255,0.25)';
+            panel.style.borderRadius = '12px';
+            panel.style.padding = '14px';
+            panel.style.zIndex = '1400';
+            panel.style.color = 'white';
+            panel.style.backdropFilter = 'blur(8px)';
+            panel.style.minWidth = '680px';
+            panel.style.maxWidth = '90vw';
+            panel.style.pointerEvents = 'auto';
+            panel.addEventListener('mousedown', (e) => e.stopPropagation());
+            panel.addEventListener('click', (e) => e.stopPropagation());
+
+            const header = document.createElement('div');
+            header.style.display = 'flex';
+            header.style.alignItems = 'center';
+            header.style.justifyContent = 'space-between';
+            header.style.marginBottom = '10px';
+            header.innerHTML = `
+                <strong style="font-size:16px;">Inventory (8x5)</strong>
+                <span style="font-size:11px; opacity:0.75;">Drag food/tools to actionbar. Press I to close.</span>
+            `;
+            panel.appendChild(header);
+
+            const summary = document.createElement('div');
+            summary.id = 'inventory-summary';
+            summary.style.fontSize = '12px';
+            summary.style.opacity = '0.85';
+            summary.style.marginBottom = '8px';
+            panel.appendChild(summary);
+
+            const grid = document.createElement('div');
+            grid.id = 'inventory-grid';
+            grid.style.display = 'grid';
+            grid.style.gridTemplateColumns = `repeat(${this.inventoryGridCols}, 78px)`;
+            grid.style.gridAutoRows = '78px';
+            grid.style.gap = '6px';
+            panel.appendChild(grid);
+
+            document.body.appendChild(panel);
+        }
+
+        this.inventoryPanel = panel;
+        this.inventoryGridElement = document.getElementById('inventory-grid');
+        if (!this.inventoryGridElement) return;
+
+        if (this.inventorySlotElements.length === this.inventorySlots.length) return;
+
+        this.inventoryGridElement.innerHTML = '';
+        this.inventorySlotElements = [];
+        for (let i = 0; i < this.inventorySlots.length; i++) {
+            const slotEl = document.createElement('div');
+            slotEl.dataset.slot = String(i);
+            slotEl.style.border = '1px solid rgba(255,255,255,0.22)';
+            slotEl.style.borderRadius = '8px';
+            slotEl.style.background = 'rgba(255,255,255,0.06)';
+            slotEl.style.position = 'relative';
+            slotEl.style.userSelect = 'none';
+            slotEl.style.cursor = 'pointer';
+            slotEl.style.padding = '4px';
+            slotEl.style.boxSizing = 'border-box';
+
+            slotEl.draggable = true;
+            slotEl.addEventListener('mousedown', (e) => e.stopPropagation());
+            slotEl.addEventListener('click', (e) => e.stopPropagation());
+            slotEl.addEventListener('dragstart', (e) => {
+                if (!this.inventorySlots[i]) {
+                    e.preventDefault();
+                    return;
+                }
+                const payload = JSON.stringify({ source: 'inventory', slotIndex: i });
+                if (e.dataTransfer) {
+                    e.dataTransfer.setData('application/x-surv-drag', payload);
+                    e.dataTransfer.setData('text/plain', payload);
+                    e.dataTransfer.effectAllowed = 'move';
+                }
+                slotEl.style.opacity = '0.55';
+            });
+            slotEl.addEventListener('dragend', () => {
+                slotEl.style.opacity = '1';
+                this.inventorySlotElements.forEach(el => { el.style.outline = ''; });
+            });
+            slotEl.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                slotEl.style.outline = '2px solid rgba(255,255,255,0.6)';
+            });
+            slotEl.addEventListener('dragleave', () => {
+                slotEl.style.outline = '';
+            });
+            slotEl.addEventListener('drop', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                slotEl.style.outline = '';
+
+                const payload = this.readDragPayload(e);
+                if (!payload) return;
+
+                if (payload.source === 'inventory') {
+                    const from = payload.slotIndex;
+                    if (from < 0 || from >= this.inventorySlots.length || from === i) return;
+                    const temp = this.inventorySlots[from];
+                    this.inventorySlots[from] = this.inventorySlots[i];
+                    this.inventorySlots[i] = temp;
+                    this.updateInventoryUI();
+                    return;
+                }
+
+                if (payload.source === 'actionbar') {
+                    const fromAction = payload.slotIndex;
+                    if (fromAction < 0 || fromAction >= this.actionbarSlots.length) return;
+                    const entry = this.makeActionbarEntryFromInventorySlot(i);
+                    this.actionbarSlots[fromAction] = entry;
+                    this.updateInventoryUI();
+                }
+            });
+
+            this.inventoryGridElement.appendChild(slotEl);
+            this.inventorySlotElements.push(slotEl);
+        }
+    }
+
+    toggleInventory(forceOpen = null) {
+        this.setupInventoryPanel();
+        const nextState = forceOpen === null ? !this.inventoryOpen : !!forceOpen;
+        this.inventoryOpen = nextState;
+        if (this.inventoryPanel) {
+            this.inventoryPanel.style.display = this.inventoryOpen ? 'block' : 'none';
+        }
+        if (this.inventoryOpen && this.controls.locked) {
+            document.exitPointerLock();
+        }
+        this.updateInventoryUI();
+    }
+
+    getInventorySlotTooltip(slot) {
+        if (!slot) return '';
+        if (slot.kind === 'tool') {
+            const tool = this.getToolById(slot.toolId);
+            if (!tool) return '';
+            return `${tool.type}\n${this.getToolDescription(tool.type)}\nDurability: ${Math.max(0, Math.round(tool.durability))}%`;
+        }
+
+        const name = this.getItemLabel(slot.itemKey);
+        const def = this.getItemDef(slot.itemKey);
+        const spoilHint = this.getSpoilageHint(slot.itemKey);
+        const spoilLine = spoilHint ? `\n${spoilHint.replace(/^\s*\(|\)\s*$/g, '')}` : '';
+        return `${name}\n${def.description}\nCount: ${slot.count}${spoilLine}`;
+    }
+
     updateInventoryUI() {
-        let invDiv = document.getElementById('inventory-panel');
-        if (!invDiv) {
-            invDiv = document.createElement('div');
-            invDiv.id = 'inventory-panel';
-            invDiv.style.marginTop = '15px';
-            invDiv.style.paddingTop = '10px';
-            invDiv.style.borderTop = '1px solid rgba(255,255,255,0.2)';
-            document.getElementById('info-panel').appendChild(invDiv);
+        this.setupInventoryPanel();
+        if (!this.inventoryGridElement) {
+            this.updateViewmodel();
+            this.updateActionbarUI();
+            return;
         }
 
-        invDiv.innerHTML = `<strong>Inventory:</strong><br>
-            Branches: ${this.inventory.branches}<br>
-            Berries: ${this.inventory.berries}${this.getSpoilageHint('berries')}<br>
-            Stones: ${this.inventory.stones}<br>
-            Logs: ${this.inventory.logs}<br>
-            Raw Meat: ${this.inventory.meat}${this.getSpoilageHint('meat')}<br>
-            Leather: ${this.inventory.leather}<br>
-            Red Mushrooms: ${this.inventory.redMushrooms}${this.getSpoilageHint('redMushrooms')}<br>
-            Yellow Mushrooms: ${this.inventory.yellowMushrooms}${this.getSpoilageHint('yellowMushrooms')}<br>
-            Cooked Meat: ${this.inventory.cookedMeat}${this.getSpoilageHint('cookedMeat')}<br>
-            Grilled Red Mushroom: ${this.inventory.grilledRedMushroom}${this.getSpoilageHint('grilledRedMushroom')}<br>
-            Grilled Yellow Mushroom: ${this.inventory.grilledYellowMushroom}${this.getSpoilageHint('grilledYellowMushroom')}<br>
-            Berry-Glazed Cut: ${this.inventory.berryGlazedMeat}${this.getSpoilageHint('berryGlazedMeat')}<br>
-            Forest Skewer: ${this.inventory.forestSkewer}${this.getSpoilageHint('forestSkewer')}<br>
-            Hearty Stew: ${this.inventory.heartyStew}${this.getSpoilageHint('heartyStew')}`;
-
-        if (this.inventory.tools.length > 0) {
-            invDiv.innerHTML += `<br><strong>Tools:</strong>`;
-            this.inventory.tools.forEach(tool => {
-                invDiv.innerHTML += `<br>${tool.type} (${tool.durability}%)`;
-            });
+        for (let i = 0; i < this.inventorySlots.length; i++) {
+            const slot = this.inventorySlots[i];
+            if (slot && slot.kind === 'tool' && !this.getToolById(slot.toolId)) {
+                this.inventorySlots[i] = null;
+            }
         }
 
-        const foodActions = document.createElement('div');
-        foodActions.style.marginTop = '10px';
-        foodActions.style.display = 'flex';
-        foodActions.style.flexWrap = 'wrap';
-        foodActions.style.gap = '6px';
-
-        const edible = Object.keys(this.foodEffects).filter((itemKey) => (this.inventory[itemKey] || 0) > 0);
-        if (edible.length > 0) {
-            const title = document.createElement('div');
-            title.style.width = '100%';
-            title.style.fontWeight = '700';
-            title.style.marginBottom = '2px';
-            title.textContent = 'Eat Food:';
-            foodActions.appendChild(title);
-
-            edible.forEach((itemKey) => {
-                const btn = document.createElement('button');
-                btn.textContent = `${this.getItemLabel(itemKey)} (${this.inventory[itemKey]})`;
-                btn.style.padding = '4px 8px';
-                btn.style.border = 'none';
-                btn.style.borderRadius = '4px';
-                btn.style.background = '#4caf50';
-                btn.style.color = 'white';
-                btn.style.cursor = 'pointer';
-                btn.style.fontSize = '11px';
-                btn.addEventListener('mousedown', (e) => e.stopPropagation());
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    this.consumeFood(itemKey);
-                };
-                foodActions.appendChild(btn);
-            });
+        const summary = document.getElementById('inventory-summary');
+        if (summary) {
+            const used = this.inventorySlots.reduce((acc, slot) => acc + (slot ? 1 : 0), 0);
+            summary.textContent = `Slots used: ${used}/${this.inventorySlots.length} | Bind food/tools by dragging to actionbar`;
         }
 
-        invDiv.appendChild(foodActions);
+        for (let i = 0; i < this.inventorySlotElements.length; i++) {
+            const slotEl = this.inventorySlotElements[i];
+            const slot = this.inventorySlots[i];
+            slotEl.innerHTML = '';
+            slotEl.title = '';
+
+            if (!slot) continue;
+
+            const icon = document.createElement('div');
+            icon.style.position = 'absolute';
+            icon.style.left = '6px';
+            icon.style.top = '6px';
+            icon.style.minWidth = '24px';
+            icon.style.padding = '2px 4px';
+            icon.style.textAlign = 'center';
+            icon.style.fontSize = '11px';
+            icon.style.fontWeight = '700';
+            icon.style.borderRadius = '4px';
+            icon.style.background = 'rgba(255,255,255,0.22)';
+            icon.style.color = 'white';
+            slotEl.appendChild(icon);
+
+            const name = document.createElement('div');
+            name.style.position = 'absolute';
+            name.style.left = '6px';
+            name.style.right = '6px';
+            name.style.top = '34px';
+            name.style.fontSize = '11px';
+            name.style.lineHeight = '1.1';
+            name.style.fontWeight = '600';
+            name.style.color = 'white';
+            name.style.whiteSpace = 'nowrap';
+            name.style.overflow = 'hidden';
+            name.style.textOverflow = 'ellipsis';
+            slotEl.appendChild(name);
+
+            const detail = document.createElement('div');
+            detail.style.position = 'absolute';
+            detail.style.right = '6px';
+            detail.style.bottom = '4px';
+            detail.style.fontSize = '11px';
+            detail.style.color = 'rgba(255,255,255,0.95)';
+            slotEl.appendChild(detail);
+
+            if (slot.kind === 'tool') {
+                const tool = this.getToolById(slot.toolId);
+                if (!tool) continue;
+                this.applyIconToBadge(icon, this.getToolIconPath(tool.type), this.getToolIcon(tool.type));
+                name.textContent = this.getToolShortName(tool.type);
+                detail.textContent = `${Math.max(0, Math.round(tool.durability))}%`;
+            } else {
+                const def = this.getItemDef(slot.itemKey);
+                this.applyIconToBadge(icon, def.iconPath || '', def.icon || 'IT');
+                name.textContent = this.getItemLabel(slot.itemKey);
+                detail.textContent = `x${slot.count}`;
+            }
+
+            slotEl.title = this.getInventorySlotTooltip(slot);
+        }
 
         this.updateViewmodel();
         this.updateActionbarUI();
@@ -4745,14 +5793,12 @@ class TerrainScene {
         const uiContainer = document.getElementById('info-panel');
 
         // Crafting Button Binding
-        const craftBtn = document.getElementById('btn-craft-axe');
-        if (craftBtn) {
-            craftBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-        }
-
-        const craftClubBtn = document.getElementById('btn-craft-club');
-        if (craftClubBtn) {
-            craftClubBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+        for (const recipe of this.craftingRecipes) {
+            if (!recipe.buttonId) continue;
+            const button = document.getElementById(recipe.buttonId);
+            if (button) {
+                button.addEventListener('mousedown', (e) => e.stopPropagation());
+            }
         }
 
         // Rain Toggle
@@ -4904,6 +5950,7 @@ class TerrainScene {
         }
 
         this.setupActionbar();
+        this.setupInventoryPanel();
         this.setupSurvivalUI();
         this.setupCookingPanel();
         this.updateSurvivalUI();
@@ -4981,6 +6028,9 @@ class TerrainScene {
             this.pigs[i].update(delta, seconds, this.camera);
         }
         this.rabbits.forEach(rabbit => rabbit.update(delta, seconds));
+        for (let i = 0; i < this.skeletonWarriors.length; i++) {
+            this.skeletonWarriors[i].update(delta, seconds, this.camera);
+        }
         this.firepits.forEach(fp => fp.update(delta));
 
         // Update Falling Trees
