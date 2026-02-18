@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+﻿import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
@@ -464,7 +464,7 @@ class TerrainGenerator {
 
 // ===== CHUNK SYSTEM =====
 class TerrainChunk {
-    constructor(group, x, z, size, resolution, generator, material, waterMaterial, treePrototypes, bushPrototypes, branchPrototypes, stonePrototypes, logPrototype, vegMaterials, mushroomPrototypes) {
+    constructor(group, x, z, size, resolution, generator, material, waterMaterial, treePrototypes, bushPrototypes, branchPrototypes, stonePrototypes, logPrototype, orePrototypes, vegMaterials, mushroomPrototypes) {
         this.group = group;
         this.x = x;
         this.z = z;
@@ -479,14 +479,18 @@ class TerrainChunk {
         this.stonePrototypes = stonePrototypes;
         this.mushroomPrototypes = mushroomPrototypes;
         this.logPrototype = logPrototype;
+        this.orePrototypes = orePrototypes || {};
         this.vegMaterials = vegMaterials;
 
         this.branchMeshes = [];
         this.bushMeshes = [];
         this.stoneMeshes = [];
+        this.copperOreMeshes = [];
+        this.ironOreMeshes = [];
         this.logMeshes = [];
         this.treeWoodMeshes = [];
         this.treeLeafMeshes = [];
+        this.treeColliders = [];
         this.mushroomMeshes = [];
         this.mesh = null;
         this.waterMesh = null;
@@ -506,6 +510,8 @@ class TerrainChunk {
         const treeData = [];
         const bushData = [];
         const stoneData = [];
+        const copperOreData = [];
+        const ironOreData = [];
 
         for (let i = 0; i < positions.length / 3; i++) {
             const xi = i % (this.resolution + 1);
@@ -581,6 +587,19 @@ class TerrainChunk {
                     stoneData.push({ x: localX, y: h, z: localZ });
                 }
             }
+
+            // Ore nodes for progression.
+            if (h > CONFIG.terrain.waterLevel + 4 && n.y > 0.65) {
+                const copperRand = Math.random();
+                if (copperRand > 0.9988) {
+                    copperOreData.push({ x: localX, y: h, z: localZ });
+                }
+
+                const ironRand = Math.random();
+                if (ironRand > 0.9980 && h > CONFIG.terrain.waterLevel + 8 && n.y > 0.58) {
+                    ironOreData.push({ x: localX, y: h, z: localZ });
+                }
+            }
         }
 
         const mushroomData = [];
@@ -631,6 +650,8 @@ class TerrainChunk {
         if (treeData.length > 0) this.generateTrees(treeData);
         if (bushData.length > 0) this.generateBushes(bushData);
         if (stoneData.length > 0) this.generateStones(stoneData);
+        if (copperOreData.length > 0) this.generateOreNodes(copperOreData, 'copper');
+        if (ironOreData.length > 0) this.generateOreNodes(ironOreData, 'iron');
         if (mushroomData.length > 0) this.generateMushrooms(mushroomData);
 
         // Generate debris around trees
@@ -696,6 +717,17 @@ class TerrainChunk {
 
                 woodMesh.setMatrixAt(i, dummy.matrix);
                 leafMesh.setMatrixAt(i, dummy.matrix);
+
+                // Approximate trunk collider centered on tree origin.
+                this.treeColliders.push({
+                    mesh: woodMesh,
+                    index: i,
+                    x: this.x + data.x,
+                    y: data.y,
+                    z: this.z + data.z,
+                    radius: Math.max(0.9, 1.45 * scale),
+                    active: true
+                });
             });
 
             woodMesh.instanceMatrix.needsUpdate = true;
@@ -859,6 +891,46 @@ class TerrainChunk {
             this.instancedMeshes.push(mesh);
             this.stoneMeshes.push(mesh);
         });
+    }
+
+    generateOreNodes(oreData, oreType = 'copper') {
+        const proto = oreType === 'iron' ? this.orePrototypes?.iron : this.orePrototypes?.copper;
+        if (!proto || !oreData || oreData.length === 0) return;
+
+        const material = oreType === 'iron'
+            ? (this.vegMaterials.ironOre || this.vegMaterials.stone)
+            : (this.vegMaterials.copperOre || this.vegMaterials.stone);
+
+        const mesh = new THREE.InstancedMesh(proto, material, oreData.length);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData.isOre = true;
+        mesh.userData.oreType = oreType;
+
+        const dummy = new THREE.Object3D();
+        oreData.forEach((data, i) => {
+            const worldX = this.x + data.x;
+            const worldZ = this.z + data.z;
+            const baseY = this.sampleGroundY(worldX, worldZ);
+            const sBase = oreType === 'iron' ? 1.5 : 1.35;
+            const scale = sBase + Math.random() * 0.85;
+            dummy.position.set(worldX, baseY + 0.55 * scale, worldZ);
+            dummy.rotation.set(
+                (Math.random() - 0.5) * 0.2,
+                Math.random() * Math.PI * 2,
+                (Math.random() - 0.5) * 0.2
+            );
+            dummy.scale.set(scale, scale * (0.9 + Math.random() * 0.35), scale);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(i, dummy.matrix);
+        });
+
+        mesh.instanceMatrix.needsUpdate = true;
+        this.group.add(mesh);
+        this.instancedMeshes.push(mesh);
+
+        if (oreType === 'iron') this.ironOreMeshes.push(mesh);
+        else this.copperOreMeshes.push(mesh);
     }
 
     sampleGroundY(worldX, worldZ) {
@@ -1049,6 +1121,17 @@ class TerrainChunk {
         return h11 + ax * (h01 - h11) + az * (h10 - h11);
     }
 
+    disableTreeCollider(mesh, index) {
+        if (!this.treeColliders || this.treeColliders.length === 0) return;
+        for (let i = 0; i < this.treeColliders.length; i++) {
+            const collider = this.treeColliders[i];
+            if (collider.mesh === mesh && collider.index === index) {
+                collider.active = false;
+                return;
+            }
+        }
+    }
+
     dispose() {
         if (this.mesh) {
             this.group.remove(this.mesh);
@@ -1064,6 +1147,9 @@ class TerrainChunk {
             mesh.dispose(); // Only dispose mesh/geometry, NOT the shared materials
         });
         this.instancedMeshes = [];
+        this.copperOreMeshes = [];
+        this.ironOreMeshes = [];
+        this.treeColliders = [];
         this.heightField = null;
     }
 }
@@ -1522,6 +1608,20 @@ class TreeGenerator {
         geometry.computeVertexNormals();
         geometry.computeBoundingSphere();
         return geometry;
+    }
+
+    generateOrePrototypes() {
+        const copper = this.createProceduralStone(401).clone();
+        copper.scale(0.95, 0.78, 0.95);
+        copper.computeVertexNormals();
+        copper.computeBoundingSphere();
+
+        const iron = this.createProceduralStone(733).clone();
+        iron.scale(0.9, 0.84, 0.9);
+        iron.computeVertexNormals();
+        iron.computeBoundingSphere();
+
+        return { copper, iron };
     }
 
     generateLogPrototype() {
@@ -2297,6 +2397,10 @@ class SkeletonWarrior {
         this.state = 'idle';
         this.stateTimer = 0.8 + Math.random() * 1.6;
         this.attackCooldown = 1.6 + Math.random() * 1.8;
+        this.maxHp = 12;
+        this.hp = this.maxHp;
+        this.dead = false;
+        this.createHealthbar();
 
         this.targetPos = new THREE.Vector3(startPos.x, startPos.y, startPos.z);
         this.groundClearance = 0.04;
@@ -2349,6 +2453,68 @@ class SkeletonWarrior {
             this.attackAction.clampWhenFinished = true;
             this.attackDuration = Math.max(0.45, attackClip.duration || 0.9);
         }
+    }
+
+    createHealthbar() {
+        this.healthCanvas = document.createElement('canvas');
+        this.healthCanvas.width = 128;
+        this.healthCanvas.height = 24;
+        this.healthCtx = this.healthCanvas.getContext('2d');
+        this.healthTexture = new THREE.CanvasTexture(this.healthCanvas);
+
+        const healthMaterial = new THREE.SpriteMaterial({
+            map: this.healthTexture,
+            transparent: true,
+            depthTest: false,
+            depthWrite: false
+        });
+
+        this.healthbar = new THREE.Sprite(healthMaterial);
+        this.healthbar.scale.set(4.8, 0.85, 1);
+        this.healthbar.renderOrder = 5000;
+        this.healthbar.visible = false;
+        this.scene.add(this.healthbar);
+
+        this.redrawHealthbar();
+    }
+
+    redrawHealthbar() {
+        const ctx = this.healthCtx;
+        if (!ctx) return;
+
+        const w = this.healthCanvas.width;
+        const h = this.healthCanvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        if (this.hp <= 0 || this.hp >= this.maxHp) {
+            this.healthbar.visible = false;
+            this.healthTexture.needsUpdate = true;
+            return;
+        }
+
+        const pad = 2;
+        const innerX = pad + 1;
+        const innerY = pad + 1;
+        const innerW = w - 2 * (pad + 1);
+        const innerH = h - 2 * (pad + 1);
+
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.fillStyle = '#2b2b2b';
+        ctx.fillRect(innerX, innerY, innerW, innerH);
+
+        const ratio = THREE.MathUtils.clamp(this.hp / this.maxHp, 0, 1);
+        const fillW = Math.floor(innerW * ratio);
+        ctx.fillStyle = '#e53935';
+        ctx.fillRect(innerX, innerY, fillW, innerH);
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, w - 2, h - 2);
+
+        this.healthbar.visible = true;
+        this.healthTexture.needsUpdate = true;
     }
 
     setAction(nextAction, fade = 0.2) {
@@ -2415,7 +2581,30 @@ class SkeletonWarrior {
         return true;
     }
 
+    takeDamage(amount) {
+        if (this.dead) return false;
+        this.hp = Math.max(0, this.hp - amount);
+        this.redrawHealthbar();
+        if (this.hp <= 0) {
+            this.die();
+            return true;
+        }
+        return false;
+    }
+
+    die() {
+        if (this.dead) return;
+        this.dead = true;
+        const deathPos = this.group.position.clone();
+        if (this.world && typeof this.world.onSkeletonKilled === 'function') {
+            this.world.onSkeletonKilled(this, deathPos);
+        } else {
+            this.dispose();
+        }
+    }
+
     update(delta, time, camera) {
+        if (this.dead) return;
         if (this.mixer) {
             this.mixer.update(delta);
         }
@@ -2424,6 +2613,10 @@ class SkeletonWarrior {
 
         const groundY = this.getGroundY(this.group.position.x, this.group.position.z);
         this.group.position.y = groundY + this.footOffset + this.groundClearance;
+        if (this.healthbar) {
+            this.healthbar.position.set(this.group.position.x, this.group.position.y + 6.2, this.group.position.z);
+            this.healthbar.visible = this.hp > 0 && this.hp < this.maxHp;
+        }
 
         if (this.state !== 'attack' && this.attackAction && camera) {
             this.tmpToPlayer.copy(camera.position).sub(this.group.position);
@@ -2481,6 +2674,13 @@ class SkeletonWarrior {
         if (this.mixer) {
             this.mixer.stopAllAction();
         }
+        if (this.healthbar) {
+            this.scene.remove(this.healthbar);
+            if (this.healthbar.material && this.healthbar.material.map) {
+                this.healthbar.material.map.dispose();
+            }
+            if (this.healthbar.material) this.healthbar.material.dispose();
+        }
         this.scene.remove(this.group);
     }
 }
@@ -2534,6 +2734,55 @@ class Firepit {
         this.fire.scale.set(scale, scale * (1.2 + Math.cos(this.time * 18) * 0.4), scale);
         this.fire.rotation.y += delta * 4;
         this.light.intensity = 60 + Math.sin(this.time * 15) * 30;
+    }
+}
+
+class Smelter {
+    constructor(scene, pos) {
+        this.scene = scene;
+        this.group = new THREE.Group();
+        this.group.position.copy(pos);
+        this.interactionMeshes = [];
+
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6f7178, roughness: 0.9, metalness: 0.05, flatShading: true });
+        const emberMat = new THREE.MeshBasicMaterial({ color: 0xff7b2d, transparent: true, opacity: 0.75 });
+
+        const base = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 2.2, 1.2, 10), bodyMat);
+        base.position.y = 0.6;
+        this.group.add(base);
+        this.interactionMeshes.push(base);
+
+        const furnace = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.8, 2.2, 10), bodyMat);
+        furnace.position.y = 2.0;
+        this.group.add(furnace);
+        this.interactionMeshes.push(furnace);
+
+        const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 2.0, 8), bodyMat);
+        chimney.position.set(0, 3.7, -0.15);
+        this.group.add(chimney);
+        this.interactionMeshes.push(chimney);
+
+        const mouth = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.9, 0.4), emberMat);
+        mouth.position.set(0, 1.55, 1.55);
+        this.group.add(mouth);
+        this.interactionMeshes.push(mouth);
+
+        this.glow = new THREE.PointLight(0xff8f3a, 12, 20);
+        this.glow.position.set(0, 1.9, 1.2);
+        this.group.add(this.glow);
+
+        this.scene.add(this.group);
+        this.time = Math.random() * 5;
+
+        this.interactionMeshes.forEach((mesh) => {
+            mesh.userData.isSmelter = true;
+            mesh.userData.smelterRef = this;
+        });
+    }
+
+    update(delta) {
+        this.time += delta;
+        this.glow.intensity = 10 + Math.sin(this.time * 9.0) * 3.0;
     }
 }
 
@@ -2857,6 +3106,13 @@ class TerrainScene {
             logs: 0,
             meat: 0,
             leather: 0,
+            bones: 0,
+            leatherStrips: 0,
+            copperOre: 0,
+            ironOre: 0,
+            charcoal: 0,
+            copperIngots: 0,
+            ironIngots: 0,
             redMushrooms: 0,
             yellowMushrooms: 0,
             cookedMeat: 0,
@@ -2874,6 +3130,13 @@ class TerrainScene {
             logs: 'Logs',
             meat: 'Raw Meat',
             leather: 'Leather',
+            bones: 'Bones',
+            leatherStrips: 'Leather Strips',
+            copperOre: 'Copper Ore',
+            ironOre: 'Iron Ore',
+            charcoal: 'Charcoal',
+            copperIngots: 'Copper Ingots',
+            ironIngots: 'Iron Ingots',
             redMushrooms: 'Red Mushrooms',
             yellowMushrooms: 'Yellow Mushrooms',
             cookedMeat: 'Cooked Meat',
@@ -2884,26 +3147,40 @@ class TerrainScene {
             heartyStew: 'Hearty Stew'
         };
         this.itemDefinitions = {
-            branches: { icon: 'BR', iconPath: 'assets/icons/branches.svg', description: 'Light wood for basic crafting.', stackSize: 99, bindable: false },
-            berries: { icon: 'BE', iconPath: 'assets/icons/berries.svg', description: 'Fresh fruit. Small hunger recovery.', stackSize: 99, bindable: true },
-            stones: { icon: 'ST', iconPath: 'assets/icons/stones.svg', description: 'Stone resource for tools and structures.', stackSize: 99, bindable: false },
-            logs: { icon: 'LG', iconPath: 'assets/icons/logs.svg', description: 'Heavy wood used for building and crafting.', stackSize: 99, bindable: false },
-            meat: { icon: 'RM', iconPath: 'assets/icons/meat.svg', description: 'Raw meat. Better cooked at a firepit.', stackSize: 99, bindable: false },
-            leather: { icon: 'LE', iconPath: 'assets/icons/leather.svg', description: 'Animal hide used for future crafting.', stackSize: 99, bindable: false },
-            redMushrooms: { icon: 'MR', iconPath: 'assets/icons/redMushrooms.svg', description: 'Forest mushroom. Cook before eating.', stackSize: 99, bindable: false },
-            yellowMushrooms: { icon: 'MY', iconPath: 'assets/icons/yellowMushrooms.svg', description: 'Earthy mushroom. Cook before eating.', stackSize: 99, bindable: false },
-            cookedMeat: { icon: 'CM', iconPath: 'assets/icons/cookedMeat.svg', description: 'Cooked protein. Solid hunger and stamina restore.', stackSize: 99, bindable: true },
-            grilledRedMushroom: { icon: 'GR', iconPath: 'assets/icons/grilledRedMushroom.svg', description: 'Grilled mushroom with regen support.', stackSize: 99, bindable: true },
-            grilledYellowMushroom: { icon: 'GY', iconPath: 'assets/icons/grilledYellowMushroom.svg', description: 'Grilled mushroom with stamina support.', stackSize: 99, bindable: true },
-            berryGlazedMeat: { icon: 'BG', iconPath: 'assets/icons/berryGlazedMeat.svg', description: 'Combo meal with strong sprint boost.', stackSize: 99, bindable: true },
-            forestSkewer: { icon: 'FS', iconPath: 'assets/icons/forestSkewer.svg', description: 'Balanced combo food with long buffs.', stackSize: 99, bindable: true },
-            heartyStew: { icon: 'HS', iconPath: 'assets/icons/heartyStew.svg', description: 'High-tier meal with strong recovery.', stackSize: 99, bindable: true }
+            branches: { icon: 'BR', iconPath: 'assets/icons/branches.svg', description: 'Light wood for basic crafting.', stackSize: 999, bindable: false },
+            berries: { icon: 'BE', iconPath: 'assets/icons/berries.svg', description: 'Fresh fruit. Small hunger recovery.', stackSize: 999, bindable: true },
+            stones: { icon: 'ST', iconPath: 'assets/icons/stones.svg', description: 'Stone resource for tools and structures.', stackSize: 999, bindable: false },
+            logs: { icon: 'LG', iconPath: 'assets/icons/logs.svg', description: 'Heavy wood used for building and crafting.', stackSize: 999, bindable: false },
+            meat: { icon: 'RM', iconPath: 'assets/icons/meat.svg', description: 'Raw meat. Better cooked at a firepit.', stackSize: 999, bindable: false },
+            leather: { icon: 'LE', iconPath: 'assets/icons/leather.svg', description: 'Animal hide used for future crafting.', stackSize: 999, bindable: false },
+            bones: { icon: 'BN', iconPath: '', description: 'Rigid bones from undead and beasts. Used for bone-tier tools.', stackSize: 999, bindable: false },
+            leatherStrips: { icon: 'LS', iconPath: '', description: 'Processed leather bindings used for tool upgrades.', stackSize: 999, bindable: false },
+            copperOre: { icon: 'CO', iconPath: '', description: 'Raw copper ore. Smelt into copper ingots.', stackSize: 999, bindable: false },
+            ironOre: { icon: 'IO', iconPath: '', description: 'Raw iron ore. Requires better tools to mine.', stackSize: 999, bindable: false },
+            charcoal: { icon: 'CH', iconPath: '', description: 'Fuel made from logs. Needed for smelting.', stackSize: 999, bindable: false },
+            copperIngots: { icon: 'CI', iconPath: '', description: 'Refined copper metal for advanced crafting.', stackSize: 999, bindable: false },
+            ironIngots: { icon: 'II', iconPath: '', description: 'Refined iron metal for top-tier tools.', stackSize: 999, bindable: false },
+            redMushrooms: { icon: 'MR', iconPath: 'assets/icons/redMushrooms.svg', description: 'Forest mushroom. Cook before eating.', stackSize: 999, bindable: false },
+            yellowMushrooms: { icon: 'MY', iconPath: 'assets/icons/yellowMushrooms.svg', description: 'Earthy mushroom. Cook before eating.', stackSize: 999, bindable: false },
+            cookedMeat: { icon: 'CM', iconPath: 'assets/icons/cookedMeat.svg', description: 'Cooked protein. Solid hunger and stamina restore.', stackSize: 999, bindable: true },
+            grilledRedMushroom: { icon: 'GR', iconPath: 'assets/icons/grilledRedMushroom.svg', description: 'Grilled mushroom with regen support.', stackSize: 999, bindable: true },
+            grilledYellowMushroom: { icon: 'GY', iconPath: 'assets/icons/grilledYellowMushroom.svg', description: 'Grilled mushroom with stamina support.', stackSize: 999, bindable: true },
+            berryGlazedMeat: { icon: 'BG', iconPath: 'assets/icons/berryGlazedMeat.svg', description: 'Combo meal with strong sprint boost.', stackSize: 999, bindable: true },
+            forestSkewer: { icon: 'FS', iconPath: 'assets/icons/forestSkewer.svg', description: 'Balanced combo food with long buffs.', stackSize: 999, bindable: true },
+            heartyStew: { icon: 'HS', iconPath: 'assets/icons/heartyStew.svg', description: 'High-tier meal with strong recovery.', stackSize: 999, bindable: true }
         };
         this.toolDefinitions = {
             'Stone Axe': {
                 icon: 'AX',
                 iconPath: 'assets/icons/tool_stone_axe.svg',
                 shortName: 'Axe',
+                family: 'axe',
+                tier: 1,
+                damage: 2.0,
+                harvestDamage: 1.0,
+                harvestTier: 0,
+                canChopTrees: true,
+                canMineOre: false,
                 maxDurability: 100,
                 modelPath: 'assets/models/axe.glb',
                 viewmodel: {
@@ -2913,12 +3190,19 @@ class TerrainScene {
                     modelRotation: [0.0, 0.0, 0.0],
                     modelScale: [1.14, 1.14, 1.14]
                 },
-                description: 'Cuts trees. Loses durability each use.'
+                description: 'Tier I axe. Woodcutting tool.'
             },
             'Stone Club': {
                 icon: 'CL',
                 iconPath: 'assets/icons/tool_stone_club.svg',
                 shortName: 'Club',
+                family: 'club',
+                tier: 1,
+                damage: 3.0,
+                harvestDamage: 0.0,
+                harvestTier: 0,
+                canChopTrees: false,
+                canMineOre: false,
                 maxDurability: 100,
                 modelPath: 'assets/models/club.glb',
                 viewmodel: {
@@ -2929,7 +3213,143 @@ class TerrainScene {
                     modelScale: [0.96, 0.96, 0.96],
                     gripOffset: [0.0, 0.0, -1.52]
                 },
-                description: 'Melee weapon for pigs. Loses durability each hit.'
+                description: 'Tier I club. Basic melee weapon.'
+            },
+            'Bone Axe': {
+                icon: 'BA',
+                iconPath: 'assets/icons/tool_stone_axe.svg',
+                shortName: 'B-Axe',
+                family: 'axe',
+                tier: 2,
+                damage: 2.8,
+                harvestDamage: 1.6,
+                harvestTier: 0,
+                canChopTrees: true,
+                canMineOre: false,
+                maxDurability: 180,
+                modelPath: 'assets/models/axe.glb',
+                viewmodel: {
+                    holdPosition: [0.45, -0.67, -0.98],
+                    holdRotation: [0.02, -1.72, 0.08],
+                    modelPosition: [0.0, 0.0, 0.0],
+                    modelRotation: [0.0, 0.0, 0.0],
+                    modelScale: [1.14, 1.14, 1.14]
+                },
+                description: 'Tier II axe. Faster woodcutting.'
+            },
+            'Bone Club': {
+                icon: 'BC',
+                iconPath: 'assets/icons/tool_stone_club.svg',
+                shortName: 'B-Club',
+                family: 'club',
+                tier: 2,
+                damage: 4.5,
+                harvestDamage: 0.0,
+                harvestTier: 0,
+                canChopTrees: false,
+                canMineOre: false,
+                maxDurability: 180,
+                modelPath: 'assets/models/club.glb',
+                viewmodel: {
+                    holdPosition: [0.47, -0.65, -1.02],
+                    holdRotation: [0.10, -1.68, 0.10],
+                    modelPosition: [0.02, 0.02, 0.00],
+                    modelRotation: [0.0, Math.PI * 0.5, Math.PI * 0.5],
+                    modelScale: [0.96, 0.96, 0.96],
+                    gripOffset: [0.0, 0.0, -1.52]
+                },
+                description: 'Tier II club. Better melee damage and durability.'
+            },
+            'Metal Axe': {
+                icon: 'MA',
+                iconPath: 'assets/icons/tool_stone_axe.svg',
+                shortName: 'M-Axe',
+                family: 'axe',
+                tier: 3,
+                damage: 3.5,
+                harvestDamage: 2.4,
+                harvestTier: 0,
+                canChopTrees: true,
+                canMineOre: false,
+                maxDurability: 320,
+                modelPath: 'assets/models/axe.glb',
+                viewmodel: {
+                    holdPosition: [0.45, -0.67, -0.98],
+                    holdRotation: [0.02, -1.72, 0.08],
+                    modelPosition: [0.0, 0.0, 0.0],
+                    modelRotation: [0.0, 0.0, 0.0],
+                    modelScale: [1.14, 1.14, 1.14]
+                },
+                description: 'Tier III axe. Top-tier woodcutting and durability.'
+            },
+            'Bone Pickaxe': {
+                icon: 'BP',
+                iconPath: 'assets/icons/tool_pickaxe.svg',
+                shortName: 'B-Pick',
+                family: 'pickaxe',
+                tier: 2,
+                damage: 2.2,
+                harvestDamage: 1.7,
+                harvestTier: 1,
+                canChopTrees: false,
+                canMineOre: true,
+                maxDurability: 180,
+                modelPath: 'assets/models/pickaxe.glb',
+                viewmodel: {
+                    holdPosition: [0.50, -0.70, -1.02],
+                    holdRotation: [0.10, -1.68, 0.10],
+                    modelPosition: [0.02, 0.01, 0.00],
+                    modelRotation: [Math.PI, Math.PI * 0.5, Math.PI * 0.5],
+                    modelScale: [1.08, 1.08, 1.08],
+                    gripOffset: [0.0, 0.0, -1.62]
+                },
+                description: 'Tier I pickaxe. Mines copper deposits.'
+            },
+            'Copper Pickaxe': {
+                icon: 'CP',
+                iconPath: 'assets/icons/tool_pickaxe.svg',
+                shortName: 'C-Pick',
+                family: 'pickaxe',
+                tier: 3,
+                damage: 2.8,
+                harvestDamage: 2.3,
+                harvestTier: 2,
+                canChopTrees: false,
+                canMineOre: true,
+                maxDurability: 300,
+                modelPath: 'assets/models/pickaxe.glb',
+                viewmodel: {
+                    holdPosition: [0.50, -0.70, -1.02],
+                    holdRotation: [0.10, -1.68, 0.10],
+                    modelPosition: [0.02, 0.01, 0.00],
+                    modelRotation: [Math.PI, Math.PI * 0.5, Math.PI * 0.5],
+                    modelScale: [1.08, 1.08, 1.08],
+                    gripOffset: [0.0, 0.0, -1.62]
+                },
+                description: 'Tier II pickaxe. Mines copper and iron deposits.'
+            },
+            'Metal Club': {
+                icon: 'MC',
+                iconPath: 'assets/icons/tool_stone_club.svg',
+                shortName: 'M-Club',
+                family: 'club',
+                tier: 3,
+                damage: 6.0,
+                harvestDamage: 0.0,
+                harvestTier: 0,
+                canChopTrees: false,
+                canMineOre: false,
+                maxDurability: 300,
+                modelPath: 'assets/models/club.glb',
+                viewmodel: {
+                    holdPosition: [0.47, -0.65, -1.02],
+                    holdRotation: [0.10, -1.68, 0.10],
+                    modelPosition: [0.02, 0.02, 0.00],
+                    modelRotation: [0.0, Math.PI * 0.5, Math.PI * 0.5],
+                    modelScale: [0.96, 0.96, 0.96],
+                    gripOffset: [0.0, 0.0, -1.52]
+                },
+                description: 'Tier III club. Heavy melee damage.'
             }
         };
         this.craftingRecipes = [
@@ -2952,12 +3372,89 @@ class TerrainScene {
                 successFeedbackRaw: false
             },
             {
+                id: 'leather_strips',
+                buttonId: 'btn-craft-leather-strips',
+                name: 'Leather Strips',
+                ingredients: { leather: 1 },
+                result: { kind: 'items', outputs: { leatherStrips: 2 } },
+                successFeedback: 'Leather Strips x2',
+                successFeedbackRaw: true
+            },
+            {
+                id: 'bone_axe',
+                buttonId: 'btn-craft-bone-axe',
+                name: 'Bone Axe',
+                ingredients: { bones: 3, leatherStrips: 1 },
+                toolRequirements: { 'Stone Axe': 1 },
+                result: { kind: 'tool', type: 'Bone Axe' },
+                successFeedback: 'Bone Axe',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'bone_club',
+                buttonId: 'btn-craft-bone-club',
+                name: 'Bone Club',
+                ingredients: { bones: 3, leatherStrips: 1 },
+                toolRequirements: { 'Stone Club': 1 },
+                result: { kind: 'tool', type: 'Bone Club' },
+                successFeedback: 'Bone Club',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'bone_pickaxe',
+                buttonId: 'btn-craft-bone-pickaxe',
+                name: 'Bone Pickaxe',
+                ingredients: { bones: 3, leatherStrips: 1, stones: 1 },
+                result: { kind: 'tool', type: 'Bone Pickaxe' },
+                successFeedback: 'Bone Pickaxe',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'copper_pickaxe',
+                buttonId: 'btn-craft-copper-pickaxe',
+                name: 'Copper Pickaxe',
+                ingredients: { copperIngots: 2, leatherStrips: 1 },
+                toolRequirements: { 'Bone Pickaxe': 1 },
+                result: { kind: 'tool', type: 'Copper Pickaxe' },
+                successFeedback: 'Copper Pickaxe',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'metal_axe',
+                buttonId: 'btn-craft-metal-axe',
+                name: 'Metal Axe',
+                ingredients: { ironIngots: 2, copperIngots: 1, leatherStrips: 1 },
+                toolRequirements: { 'Bone Axe': 1 },
+                result: { kind: 'tool', type: 'Metal Axe' },
+                successFeedback: 'Metal Axe',
+                successFeedbackRaw: false
+            },
+            {
+                id: 'metal_club',
+                buttonId: 'btn-craft-metal-club',
+                name: 'Metal Club',
+                ingredients: { ironIngots: 1, copperIngots: 1, leatherStrips: 1 },
+                toolRequirements: { 'Bone Club': 1 },
+                result: { kind: 'tool', type: 'Metal Club' },
+                successFeedback: 'Metal Club',
+                successFeedbackRaw: false
+            },
+            {
                 id: 'firepit',
                 buttonId: 'btn-craft-firepit',
                 name: 'Firepit',
                 ingredients: { logs: 5, stones: 2 },
                 result: { kind: 'placement', placementType: 'firepit' },
                 successFeedback: 'Placing Firepit...',
+                successFeedbackRaw: true
+            },
+            {
+                id: 'smelter',
+                buttonId: 'btn-craft-smelter',
+                name: 'Smelter',
+                ingredients: { stones: 8, logs: 4 },
+                result: { kind: 'placement', placementType: 'smelter' },
+                successFeedback: 'Placing Smelter...',
                 successFeedbackRaw: true
             },
             {
@@ -3027,6 +3524,7 @@ class TerrainScene {
                 id: 'cooked_meat',
                 name: 'Cooked Meat',
                 description: 'Basic seared meat.',
+                station: 'firepit',
                 ingredients: { meat: 1 },
                 outputs: { cookedMeat: 1 }
             },
@@ -3034,6 +3532,7 @@ class TerrainScene {
                 id: 'grilled_red_mushroom',
                 name: 'Grilled Red Mushroom',
                 description: 'Light cooked mushroom snack.',
+                station: 'firepit',
                 ingredients: { redMushrooms: 1 },
                 outputs: { grilledRedMushroom: 1 }
             },
@@ -3041,6 +3540,7 @@ class TerrainScene {
                 id: 'grilled_yellow_mushroom',
                 name: 'Grilled Yellow Mushroom',
                 description: 'Quick energy boost.',
+                station: 'firepit',
                 ingredients: { yellowMushrooms: 1 },
                 outputs: { grilledYellowMushroom: 1 }
             },
@@ -3048,6 +3548,7 @@ class TerrainScene {
                 id: 'berry_glazed_meat',
                 name: 'Berry-Glazed Cut',
                 description: 'Combo: meat + berries, great sprint boost.',
+                station: 'firepit',
                 ingredients: { meat: 1, berries: 2 },
                 outputs: { berryGlazedMeat: 1 }
             },
@@ -3055,6 +3556,7 @@ class TerrainScene {
                 id: 'forest_skewer',
                 name: 'Forest Skewer',
                 description: 'Combo: meat + red + yellow mushroom.',
+                station: 'firepit',
                 ingredients: { meat: 1, redMushrooms: 1, yellowMushrooms: 1 },
                 outputs: { forestSkewer: 1 }
             },
@@ -3062,8 +3564,33 @@ class TerrainScene {
                 id: 'hearty_stew',
                 name: 'Hearty Stew',
                 description: 'Big combo meal with long buffs.',
+                station: 'firepit',
                 ingredients: { meat: 2, redMushrooms: 1, yellowMushrooms: 1, berries: 2 },
                 outputs: { heartyStew: 1 }
+            },
+            {
+                id: 'charcoal',
+                name: 'Charcoal',
+                description: 'Smolder logs into smelting fuel.',
+                station: 'firepit',
+                ingredients: { logs: 1 },
+                outputs: { charcoal: 1 }
+            },
+            {
+                id: 'copper_ingot',
+                name: 'Copper Ingot',
+                description: 'Smelt copper ore with charcoal.',
+                station: 'smelter',
+                ingredients: { copperOre: 2, charcoal: 1 },
+                outputs: { copperIngots: 1 }
+            },
+            {
+                id: 'iron_ingot',
+                name: 'Iron Ingot',
+                description: 'Smelt iron ore with charcoal.',
+                station: 'smelter',
+                ingredients: { ironOre: 2, charcoal: 1 },
+                outputs: { ironIngots: 1 }
             }
         ];
         this.playerStats = {
@@ -3103,17 +3630,22 @@ class TerrainScene {
         this.tmpDropSlopeQuat = new THREE.Quaternion();
         this.focusedItem = null; // { mesh, index, type }
         this.craftingOpen = false;
+        this.playerCollisionRadius = 1.0;
+        this.wallCollisionHalfDepth = 0.35;
         this.pigs = [];
         this.rabbits = [];
         this.skeletonWarriors = [];
         this.playerSpawnPoint = new THREE.Vector3();
         this.firepits = [];
+        this.smelters = [];
         this.walls = [];
         this.triWalls = [];
         this.floors = [];
         this.roofs = [];
+        this.resourceNodeState = new Map();
+        this.treeNodeHealth = new Map();
         this.activeFallingTrees = []; // List of { group, pos, chunk, vel, angle, axis, quat }
-        this.placementMode = null; // 'firepit', 'wall', 'floor', 'roof' or null
+        this.placementMode = null; // 'firepit', 'smelter', 'wall', 'floor', 'roof' or null
         this.placementGhost = null;
         this.placementRotation = 0; // 0 to 15 (16 steps)
         this.placementFlipped = false;
@@ -3140,6 +3672,7 @@ class TerrainScene {
         this.stonePrototypes = this.treeGenerator.generateStonePrototypes(3);
         this.logPrototype = this.treeGenerator.generateLogPrototype();
         this.mushroomPrototypes = this.treeGenerator.generateMushroomPrototypes();
+        this.orePrototypes = this.treeGenerator.generateOrePrototypes();
 
         this.terrainGroup = new THREE.Group();
         this.scene.add(this.terrainGroup);
@@ -3154,6 +3687,63 @@ class TerrainScene {
 
         this.meatDropMaterial = new THREE.MeshStandardMaterial({ color: 0xb04132, roughness: 0.8, flatShading: true });
         this.leatherDropMaterial = new THREE.MeshStandardMaterial({ color: 0x8d6e63, roughness: 0.95, flatShading: true });
+        this.boneDropMaterial = new THREE.MeshStandardMaterial({ color: 0xe8e2d6, roughness: 0.85, flatShading: true });
+        this.dropDefinitions = {
+            meat: {
+                itemKey: 'meat',
+                createGeometry: () => new THREE.BoxGeometry(0.57, 0.42, 0.42),
+                material: this.meatDropMaterial,
+                pickupName: 'Raw Meat',
+                supportMargin: 0.024,
+                orientation: 'free'
+            },
+            leather: {
+                itemKey: 'leather',
+                createGeometry: () => new THREE.BoxGeometry(0.825, 0.12, 0.6),
+                material: this.leatherDropMaterial,
+                pickupName: 'Leather',
+                supportMargin: 0.018,
+                orientation: 'flat'
+            },
+            bones: {
+                itemKey: 'bones',
+                createGeometry: () => new THREE.CapsuleGeometry(0.17, 0.72, 6, 10),
+                material: this.boneDropMaterial,
+                pickupName: 'Bones',
+                supportMargin: 0.02,
+                orientation: 'tilted'
+            }
+        };
+        this.creatureDropTables = {
+            pig: [
+                { type: 'meat', min: 1, max: 3 },
+                { type: 'leather', min: 1, max: 1 }
+            ],
+            rabbit: [],
+            skeleton: [
+                { type: 'bones', min: 2, max: 4 }
+            ]
+        };
+        this.oreNodeDefinitions = {
+            copper: {
+                displayName: 'Copper Deposit',
+                itemKey: 'copperOre',
+                requiredTier: 1,
+                unitHp: 3.8,
+                minUnits: 3,
+                maxUnits: 6,
+                minScaleFactor: 0.62
+            },
+            iron: {
+                displayName: 'Iron Deposit',
+                itemKey: 'ironOre',
+                requiredTier: 2,
+                unitHp: 5.0,
+                minUnits: 2,
+                maxUnits: 4,
+                minScaleFactor: 0.66
+            }
+        };
 
         this.setupControls();
         this.setupUI();
@@ -3231,6 +3821,8 @@ class TerrainScene {
 
         // Static material for logs (no wind)
         this.logMaterial = new THREE.MeshStandardMaterial({ color: 0x5d4037, roughness: 0.9, flatShading: true });
+        this.copperOreMaterial = new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.72, metalness: 0.24, flatShading: true, side: THREE.DoubleSide });
+        this.ironOreMaterial = new THREE.MeshStandardMaterial({ color: 0x8f98a2, roughness: 0.68, metalness: 0.20, flatShading: true, side: THREE.DoubleSide });
 
         // Mushroom Materials
         this.mushroomStemMaterial = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.9, flatShading: true });
@@ -3304,6 +3896,161 @@ class TerrainScene {
         return fallback;
     }
 
+    resolvePointAgainstOrientedRect(px, pz, cx, cz, yaw, halfWidth, halfDepth, extraRadius = 0) {
+        const ex = halfWidth + extraRadius;
+        const ez = halfDepth + extraRadius;
+        const c = Math.cos(yaw);
+        const s = Math.sin(yaw);
+
+        const dx = px - cx;
+        const dz = pz - cz;
+        let lx = dx * c + dz * s;
+        let lz = -dx * s + dz * c;
+
+        if (Math.abs(lx) >= ex || Math.abs(lz) >= ez) return null;
+
+        const penX = ex - Math.abs(lx);
+        const penZ = ez - Math.abs(lz);
+        if (penX < penZ) {
+            lx = lx >= 0 ? ex : -ex;
+        } else {
+            lz = lz >= 0 ? ez : -ez;
+        }
+
+        return {
+            x: cx + lx * c - lz * s,
+            z: cz + lx * s + lz * c
+        };
+    }
+
+    resolvePlayerCollisions() {
+        if (!this.controls || this.controls.mode !== 'walk') return;
+
+        const pos = this.camera.position;
+        const eyeY = pos.y;
+        const feetY = eyeY - (this.controls?.playerHeight || 5.0);
+        const playerRadius = this.playerCollisionRadius;
+        let px = pos.x;
+        let pz = pos.z;
+        let collided = false;
+
+        const treePad = 18;
+        const chunkPad = this.chunkSize * 0.5 + treePad;
+
+        for (let iter = 0; iter < 3; iter++) {
+            let changed = false;
+
+            // Tree trunk collisions.
+            for (const chunk of this.chunks.values()) {
+                if (!chunk.treeColliders || chunk.treeColliders.length === 0) continue;
+                if (Math.abs(chunk.x - px) > chunkPad || Math.abs(chunk.z - pz) > chunkPad) continue;
+
+                for (let i = 0; i < chunk.treeColliders.length; i++) {
+                    const collider = chunk.treeColliders[i];
+                    if (!collider.active) continue;
+                    if (eyeY < collider.y - 1.0 || eyeY > collider.y + 10.0) continue;
+
+                    const minDist = playerRadius + collider.radius;
+                    const dx = px - collider.x;
+                    const dz = pz - collider.z;
+                    const d2 = dx * dx + dz * dz;
+                    if (d2 >= minDist * minDist) continue;
+
+                    let dist = Math.sqrt(d2);
+                    let nx = 1;
+                    let nz = 0;
+                    if (dist > 1e-6) {
+                        nx = dx / dist;
+                        nz = dz / dist;
+                    } else {
+                        dist = 0;
+                    }
+
+                    const push = (minDist - dist) + 0.001;
+                    px += nx * push;
+                    pz += nz * push;
+                    changed = true;
+                    collided = true;
+                }
+            }
+
+            // Wall collisions.
+            for (const wall of this.walls) {
+                if (!wall?.group) continue;
+                const wallBaseY = wall.group.position.y;
+                const wallTopY = wallBaseY + wall.height;
+                if (eyeY <= wallBaseY || feetY >= wallTopY) continue;
+
+                const resolved = this.resolvePointAgainstOrientedRect(
+                    px,
+                    pz,
+                    wall.group.position.x,
+                    wall.group.position.z,
+                    wall.group.rotation.y,
+                    wall.width * 0.5,
+                    this.wallCollisionHalfDepth,
+                    playerRadius
+                );
+
+                if (resolved) {
+                    px = resolved.x;
+                    pz = resolved.z;
+                    changed = true;
+                    collided = true;
+                }
+            }
+
+            // Triangle wall collisions (approximated as shifted thin rectangle).
+            for (const triWall of this.triWalls) {
+                if (!triWall?.group) continue;
+                const triBaseY = triWall.group.position.y;
+                const triTopY = triBaseY + triWall.height;
+                if (eyeY <= triBaseY || feetY >= triTopY) continue;
+
+                const sign = triWall.group.scale.x >= 0 ? 1 : -1;
+                const yaw = triWall.group.rotation.y;
+                const c = Math.cos(yaw);
+                const s = Math.sin(yaw);
+                const localCenterX = -triWall.width * 0.5 * sign;
+                const cx = triWall.group.position.x + localCenterX * c;
+                const cz = triWall.group.position.z + localCenterX * s;
+
+                const resolved = this.resolvePointAgainstOrientedRect(
+                    px,
+                    pz,
+                    cx,
+                    cz,
+                    yaw,
+                    triWall.width * 0.5,
+                    this.wallCollisionHalfDepth,
+                    playerRadius
+                );
+
+                if (resolved) {
+                    px = resolved.x;
+                    pz = resolved.z;
+                    changed = true;
+                    collided = true;
+                }
+            }
+
+            if (!changed) break;
+        }
+
+        if (!collided) return;
+
+        pos.x = px;
+        pos.z = pz;
+
+        const groundH = this.getTerrainHeightAtPosition(px, pz);
+        const minHeight = groundH + this.controls.playerHeight;
+        if (pos.y < minHeight) {
+            pos.y = minHeight;
+            this.controls.verticalVelocity = 0;
+            this.controls.isGrounded = true;
+        }
+    }
+
     updateChunks() {
         const cx = Math.floor(this.camera.position.x / this.chunkSize) * this.chunkSize;
         const cz = Math.floor(this.camera.position.z / this.chunkSize) * this.chunkSize;
@@ -3325,6 +4072,7 @@ class TerrainScene {
         // Remove old chunks
         for (const [key, chunk] of this.chunks) {
             if (!chunksToLoad.includes(key)) {
+                this.clearResourceNodeStateForChunk(chunk);
                 chunk.dispose();
                 this.chunks.delete(key);
             }
@@ -3347,6 +4095,7 @@ class TerrainScene {
                     this.branchPrototypes,
                     this.stonePrototypes,
                     this.logPrototype,
+                    this.orePrototypes,
                     {
                         wood: this.woodMaterial,
                         leaf: this.leafMaterial,
@@ -3354,6 +4103,8 @@ class TerrainScene {
                         berry: this.berryMaterial,
                         stone: this.stoneMaterial,
                         log: this.logMaterial,
+                        copperOre: this.copperOreMaterial,
+                        ironOre: this.ironOreMaterial,
                         mushroomStem: this.mushroomStemMaterial,
                         mushroomRed: this.mushroomRedMaterial,
                         mushroomYellow: this.mushroomYellowMaterial
@@ -3361,6 +4112,24 @@ class TerrainScene {
                     this.mushroomPrototypes
                 );
                 this.chunks.set(key, chunk);
+            }
+        }
+    }
+
+    clearResourceNodeStateForChunk(chunk) {
+        if (!chunk || this.resourceNodeState.size === 0) return;
+        const oreMeshes = [];
+        if (chunk.copperOreMeshes?.length) oreMeshes.push(...chunk.copperOreMeshes);
+        if (chunk.ironOreMeshes?.length) oreMeshes.push(...chunk.ironOreMeshes);
+        if (oreMeshes.length === 0) return;
+
+        const prefixes = oreMeshes.map(mesh => `${mesh.uuid}:`);
+        for (const key of this.resourceNodeState.keys()) {
+            for (let i = 0; i < prefixes.length; i++) {
+                if (key.startsWith(prefixes[i])) {
+                    this.resourceNodeState.delete(key);
+                    break;
+                }
             }
         }
     }
@@ -3428,6 +4197,10 @@ class TerrainScene {
             this.toggleCooking(this.focusedItem.firepit || null);
             return;
         }
+        if (this.focusedItem.type === 'smelter') {
+            this.toggleCooking(this.focusedItem.smelter || null);
+            return;
+        }
         this.pickupItem();
     }
 
@@ -3439,16 +4212,12 @@ class TerrainScene {
         let itemName = "";
 
         if (mesh.userData.isDrop) {
-            if (mesh.userData.dropType === 'meat') {
-                const added = this.addInventoryItem('meat', 1);
+            const dropType = mesh.userData.dropType;
+            const def = this.dropDefinitions[dropType];
+            if (def?.itemKey) {
+                const added = this.addInventoryItem(def.itemKey, 1);
                 if (added > 0) {
-                    itemName = "Raw Meat";
-                    picked = true;
-                }
-            } else if (mesh.userData.dropType === 'leather') {
-                const added = this.addInventoryItem('leather', 1);
-                if (added > 0) {
-                    itemName = "Leather";
+                    itemName = def.pickupName || this.getItemLabel(def.itemKey);
                     picked = true;
                 }
             }
@@ -3459,7 +4228,7 @@ class TerrainScene {
 
                 if (mesh.geometry) mesh.geometry.dispose();
             } else {
-                this.showPickupFeedback("Inventory Full!", true);
+                this.showPickupFeedback(this.dropDefinitions[mesh.userData.dropType] ? "Inventory Full!" : "Cannot pick up item.", true);
             }
         } else {
             const matrix = new THREE.Matrix4();
@@ -3512,6 +4281,11 @@ class TerrainScene {
                     picked = true;
                     itemName = "Log";
                 }
+            } else if (mesh.userData.isOre) {
+                this.showPickupFeedback("Use a pickaxe to mine ore.", true);
+                this.focusedItem = null;
+                this.highlightMesh.visible = false;
+                return;
             } else if (mesh.userData.isMushroom) {
                 if (mesh.userData.mushroomType === 'red') {
                     const added = this.addInventoryItem('redMushrooms', 1);
@@ -3647,7 +4421,7 @@ class TerrainScene {
     }
 
     getItemDef(itemKey) {
-        return this.itemDefinitions[itemKey] || { icon: '??', description: 'No description.', stackSize: 99, bindable: false };
+        return this.itemDefinitions[itemKey] || { icon: '??', description: 'No description.', stackSize: 999, bindable: false };
     }
 
     isFoodItem(itemKey) {
@@ -3663,7 +4437,7 @@ class TerrainScene {
     }
 
     findInventoryStackWithSpace(itemKey) {
-        const stackSize = this.getItemDef(itemKey).stackSize ?? 99;
+        const stackSize = this.getItemDef(itemKey).stackSize ?? 999;
         for (let i = 0; i < this.inventorySlots.length; i++) {
             const slot = this.inventorySlots[i];
             if (slot && slot.kind === 'stack' && slot.itemKey === itemKey && slot.count < stackSize) {
@@ -3676,7 +4450,7 @@ class TerrainScene {
     addStackToInventorySlots(itemKey, amount) {
         if (amount <= 0) return 0;
         let remaining = amount;
-        const stackSize = this.getItemDef(itemKey).stackSize ?? 99;
+        const stackSize = this.getItemDef(itemKey).stackSize ?? 999;
 
         while (remaining > 0) {
             const slotIndex = this.findInventoryStackWithSpace(itemKey);
@@ -3751,6 +4525,30 @@ class TerrainScene {
         return this.toolDefinitions[type]?.description || 'Tool';
     }
 
+    getToolFamily(type) {
+        return this.toolDefinitions[type]?.family || '';
+    }
+
+    getToolDamage(tool) {
+        if (!tool) return 0;
+        return this.toolDefinitions[tool.type]?.damage ?? 1;
+    }
+
+    getToolHarvestDamage(tool) {
+        if (!tool) return 0;
+        return this.toolDefinitions[tool.type]?.harvestDamage ?? 0;
+    }
+
+    getToolHarvestTier(tool) {
+        if (!tool) return 0;
+        return this.toolDefinitions[tool.type]?.harvestTier ?? 0;
+    }
+
+    canToolMineOre(tool) {
+        if (!tool) return false;
+        return !!this.toolDefinitions[tool.type]?.canMineOre;
+    }
+
     applyIconToBadge(holder, iconPath, fallbackText) {
         if (!holder) return;
         holder.textContent = '';
@@ -3781,7 +4579,8 @@ class TerrainScene {
     }
 
     isChopTool(tool) {
-        return !!tool && tool.type === 'Stone Axe';
+        if (!tool) return false;
+        return !!this.toolDefinitions[tool.type]?.canChopTrees;
     }
 
     isActionbarEntryValid(entry) {
@@ -4063,49 +4862,75 @@ class TerrainScene {
             this.pigs.splice(idx, 1);
         }
 
-        this.spawnPigDrops(deathPos);
+        this.spawnEntityDrops('pig', deathPos);
         pig.dispose();
     }
 
-    spawnPigDrops(centerPos) {
-        const meatCount = 1 + Math.floor(Math.random() * 3);
-        const leatherCount = 1;
-        const total = meatCount + leatherCount;
+    onSkeletonKilled(skeleton, deathPos) {
+        const idx = this.skeletonWarriors.indexOf(skeleton);
+        if (idx !== -1) {
+            this.skeletonWarriors.splice(idx, 1);
+        }
 
-        for (let i = 0; i < total; i++) {
-            const isLeather = i >= meatCount;
-            const angle = Math.random() * Math.PI * 2;
-            const dist = 1.0 + Math.random() * 2.5;
-            const x = centerPos.x + Math.cos(angle) * dist;
-            const z = centerPos.z + Math.sin(angle) * dist;
-            const y = this.getTerrainHeightAtPosition(x, z) + 3.0 + Math.random() * 1.5;
-            this.spawnDropItem(isLeather ? 'leather' : 'meat', new THREE.Vector3(x, y, z));
+        this.spawnEntityDrops('skeleton', deathPos);
+        skeleton.dispose();
+    }
+
+    getCreatureDropTable(creatureType) {
+        return this.creatureDropTables[creatureType] || [];
+    }
+
+    spawnEntityDrops(creatureType, centerPos) {
+        const dropTable = this.getCreatureDropTable(creatureType);
+        if (!dropTable || dropTable.length === 0) return;
+
+        for (const entry of dropTable) {
+            const min = Math.max(0, entry.min ?? 0);
+            const max = Math.max(min, entry.max ?? min);
+            const count = min + Math.floor(Math.random() * (max - min + 1));
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 1.0 + Math.random() * 2.5;
+                const x = centerPos.x + Math.cos(angle) * dist;
+                const z = centerPos.z + Math.sin(angle) * dist;
+                const y = this.getTerrainHeightAtPosition(x, z) + 3.0 + Math.random() * 1.5;
+                this.spawnDropItem(entry.type, new THREE.Vector3(x, y, z));
+            }
         }
     }
 
     spawnDropItem(type, pos) {
-        // 50% larger drops than the original request baseline.
-        const mesh = type === 'leather'
-            ? new THREE.Mesh(new THREE.BoxGeometry(0.825, 0.12, 0.6), this.leatherDropMaterial)
-            : new THREE.Mesh(new THREE.BoxGeometry(0.57, 0.42, 0.42), this.meatDropMaterial);
+        const def = this.dropDefinitions[type];
+        if (!def) return;
+
+        const geometry = def.createGeometry ? def.createGeometry() : new THREE.BoxGeometry(0.5, 0.5, 0.5);
+        const material = def.material || this.meatDropMaterial;
+        const pickupName = def.pickupName || this.getItemLabel(def.itemKey || type);
+        const mesh = new THREE.Mesh(geometry, material);
 
         mesh.position.copy(pos);
         const yaw = Math.random() * Math.PI * 2;
         mesh.rotation.y = yaw;
-        if (type === 'leather') {
-            // Keep leather flat so corners cannot clip through terrain.
+        if (def.orientation === 'flat') {
             mesh.rotation.x = 0;
             mesh.rotation.z = 0;
+        } else if (def.orientation === 'tilted') {
+            mesh.rotation.x = (Math.random() - 0.5) * 0.45;
+            mesh.rotation.z = (Math.random() - 0.5) * 0.45;
+        } else {
+            mesh.rotation.x = (Math.random() - 0.5) * 0.18;
+            mesh.rotation.z = (Math.random() - 0.5) * 0.18;
         }
         mesh.castShadow = false;
         mesh.receiveShadow = false;
 
         mesh.userData.isDrop = true;
         mesh.userData.dropType = type;
-        mesh.userData.pickupName = type === 'leather' ? 'Leather' : 'Raw Meat';
+        mesh.userData.dropItemKey = def.itemKey || null;
+        mesh.userData.pickupName = pickupName;
         mesh.userData.dropYaw = yaw;
         mesh.userData.dropSupportLocal = this.getGeometryBottomSupportPoints(mesh.geometry);
-        mesh.userData.dropSupportMargin = type === 'leather' ? 0.018 : 0.024;
+        mesh.userData.dropSupportMargin = def.supportMargin ?? 0.02;
         mesh.userData.dropVelY = 0;
         mesh.userData.dropGrounded = false;
 
@@ -4210,7 +5035,7 @@ class TerrainScene {
         }
     }
 
-    tryHitPig(tool) {
+    tryHitPig(tool, damage = 1) {
         const meleeRange = 14;
         const forward = new THREE.Vector3();
         this.camera.getWorldDirection(forward);
@@ -4238,8 +5063,40 @@ class TerrainScene {
 
         if (!bestPig) return;
 
-        bestPig.takeDamage(3);
+        bestPig.takeDamage(damage);
         this.showPickupFeedback(bestPig.hp > 0 ? `Pig Hit (${bestPig.hp}/10)` : 'Pig Down!');
+    }
+
+    tryHitSkeleton(tool, damage = 1) {
+        const meleeRange = 14;
+        const forward = new THREE.Vector3();
+        this.camera.getWorldDirection(forward);
+
+        let bestSkeleton = null;
+        let bestDist = Infinity;
+        const toSkel = new THREE.Vector3();
+
+        for (const skeleton of this.skeletonWarriors) {
+            if (!skeleton || skeleton.dead) continue;
+
+            toSkel.copy(skeleton.group.position).sub(this.camera.position);
+            const dist = toSkel.length();
+            if (dist > meleeRange) continue;
+
+            const dir = toSkel.clone().normalize();
+            const dot = dir.dot(forward);
+            if (dot < 0.42) continue;
+
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestSkeleton = skeleton;
+            }
+        }
+
+        if (!bestSkeleton) return;
+
+        bestSkeleton.takeDamage(damage);
+        this.showPickupFeedback(bestSkeleton.hp > 0 ? `Skeleton Hit (${bestSkeleton.hp}/${bestSkeleton.maxHp})` : 'Skeleton Down!');
     }
 
     consumeToolDurability(tool, amount = 1) {
@@ -4247,7 +5104,7 @@ class TerrainScene {
         tool.durability -= amount;
         if (tool.durability <= 0) {
             this.removeToolById(tool.id);
-            this.showPickupFeedback(tool.type === 'Stone Club' ? "Club Broke!" : "Axe Broke!");
+            this.showPickupFeedback(`${this.getToolShortName(tool.type)} Broke!`, true);
         }
         this.updateInventoryUI();
     }
@@ -4260,11 +5117,14 @@ class TerrainScene {
         }
         const activeTool = this.getActiveTool();
         if (!activeTool) return;
+        const family = this.getToolFamily(activeTool.type);
 
-        if (activeTool.type === 'Stone Axe') {
+        if (family === 'axe') {
             this.swingTool(activeTool, this.axeModel, 1.5);
-        } else if (activeTool.type === 'Stone Club') {
+        } else if (family === 'club') {
             this.swingTool(activeTool, this.clubModel, 1.35);
+        } else if (family === 'pickaxe') {
+            this.swingTool(activeTool, this.pickaxeModel, 1.45);
         }
     }
 
@@ -4297,13 +5157,145 @@ class TerrainScene {
     }
 
     resolveToolHit(tool) {
-        if (tool?.type === 'Stone Club') {
-            this.tryHitPig(tool);
+        const family = this.getToolFamily(tool?.type);
+        const damage = this.getToolDamage(tool);
+
+        if (family === 'club') {
+            this.tryHitPig(tool, damage);
+            this.tryHitSkeleton(tool, damage);
         } else if (this.isChopTool(tool) && this.focusedItem && this.focusedItem.mesh.userData.isTree) {
-            this.chopTree(this.focusedItem.mesh, this.focusedItem.index, tool);
+            this.hitTreeNode(this.focusedItem.mesh, this.focusedItem.index, tool);
+        } else if (this.focusedItem && this.focusedItem.mesh?.userData?.isOre) {
+            this.hitOreNode(this.focusedItem.mesh, this.focusedItem.index, tool);
         }
 
         this.consumeToolDurability(tool, 1);
+    }
+
+    getNodeHealthKey(mesh, index) {
+        return `${mesh.uuid}:${index}`;
+    }
+
+    hitTreeNode(mesh, index, tool) {
+        if (index === undefined || index === null) return;
+        const harvestDamage = this.getToolHarvestDamage(tool);
+        if (harvestDamage <= 0) {
+            this.showPickupFeedback('Need a harvesting axe.', true);
+            return;
+        }
+
+        const key = this.getNodeHealthKey(mesh, index);
+        const maxHp = 6.0;
+        const nextHp = Math.max(0, (this.treeNodeHealth.get(key) ?? maxHp) - harvestDamage);
+        this.treeNodeHealth.set(key, nextHp);
+
+        if (nextHp <= 0.001) {
+            this.treeNodeHealth.delete(key);
+            this.chopTree(mesh, index, tool);
+        } else {
+            this.showPickupFeedback(`Tree ${Math.ceil(nextHp)}/${Math.ceil(maxHp)}`, true);
+        }
+    }
+
+    hitOreNode(mesh, index, tool) {
+        if (!mesh?.userData?.isOre || index === undefined || index === null) return;
+        if (!this.canToolMineOre(tool)) {
+            this.showPickupFeedback('Need a pickaxe to mine ore.', true);
+            return;
+        }
+
+        const oreType = mesh.userData.oreType === 'iron' ? 'iron' : 'copper';
+        const config = this.getOreNodeConfig(oreType);
+
+        const toolTier = this.getToolHarvestTier(tool);
+        if (toolTier < config.requiredTier) {
+            this.showPickupFeedback(`${config.displayName} needs tier ${config.requiredTier}+ pickaxe.`, true);
+            return;
+        }
+
+        const harvestDamage = Math.max(0.1, this.getToolHarvestDamage(tool));
+        const key = this.getNodeHealthKey(mesh, index);
+        const state = this.getOrCreateOreNodeState(mesh, index, config, key);
+        if (!state) return;
+
+        state.currentUnitHp = Math.max(0, state.currentUnitHp - harvestDamage);
+
+        if (state.currentUnitHp > 0.001) {
+            this.showPickupFeedback(`${config.displayName} ${Math.ceil(state.currentUnitHp)}/${Math.ceil(state.unitHp)} (${state.remainingUnits} left)`, true);
+            return;
+        }
+
+        const added = this.addInventoryItem(config.itemKey, 1);
+        if (added < 1) {
+            state.currentUnitHp = Math.min(state.unitHp, 0.2);
+            this.showPickupFeedback('Inventory Full!', true);
+            return;
+        }
+
+        state.remainingUnits = Math.max(0, state.remainingUnits - 1);
+
+        this.updateInventoryUI();
+        if (state.remainingUnits <= 0) {
+            const matrix = new THREE.Matrix4();
+            matrix.makeScale(0, 0, 0);
+            mesh.setMatrixAt(index, matrix);
+            mesh.instanceMatrix.needsUpdate = true;
+            this.resourceNodeState.delete(key);
+            this.showPickupFeedback(`${this.getItemLabel(config.itemKey)} x1`, true);
+            return;
+        }
+
+        state.currentUnitHp = state.unitHp;
+        this.updateOreNodeVisual(mesh, index, state, config);
+        this.showPickupFeedback(`${this.getItemLabel(config.itemKey)} x1 (${state.remainingUnits} left)`, true);
+    }
+
+    getOreNodeConfig(oreType) {
+        return this.oreNodeDefinitions[oreType] || this.oreNodeDefinitions.copper;
+    }
+
+    getOrCreateOreNodeState(mesh, index, config, key = null) {
+        const stateKey = key || this.getNodeHealthKey(mesh, index);
+        const existing = this.resourceNodeState.get(stateKey);
+        if (existing) return existing;
+
+        const matrix = new THREE.Matrix4();
+        mesh.getMatrixAt(index, matrix);
+        const pos = new THREE.Vector3();
+        const quat = new THREE.Quaternion();
+        const scale = new THREE.Vector3();
+        matrix.decompose(pos, quat, scale);
+        if (scale.lengthSq() < 1e-8) return null;
+
+        const minUnits = Math.max(1, Math.floor(config.minUnits ?? 1));
+        const maxUnits = Math.max(minUnits, Math.floor(config.maxUnits ?? minUnits));
+        const totalUnits = minUnits + Math.floor(Math.random() * (maxUnits - minUnits + 1));
+        const unitHp = Math.max(0.5, config.unitHp ?? 4);
+
+        const state = {
+            totalUnits,
+            remainingUnits: totalUnits,
+            unitHp,
+            currentUnitHp: unitHp,
+            basePosition: pos.clone(),
+            baseQuaternion: quat.clone(),
+            baseScale: scale.clone()
+        };
+
+        this.resourceNodeState.set(stateKey, state);
+        return state;
+    }
+
+    updateOreNodeVisual(mesh, index, state, config) {
+        if (!mesh || !state || !config) return;
+        const minScaleFactor = THREE.MathUtils.clamp(config.minScaleFactor ?? 0.62, 0.15, 1.0);
+        const remainingRatio = THREE.MathUtils.clamp(state.remainingUnits / Math.max(1, state.totalUnits), 0, 1);
+        const scalar = minScaleFactor + remainingRatio * (1 - minScaleFactor);
+        const matrix = new THREE.Matrix4();
+        const scaled = state.baseScale.clone().multiplyScalar(scalar);
+        matrix.compose(state.basePosition, state.baseQuaternion, scaled);
+        mesh.setMatrixAt(index, matrix);
+        mesh.instanceMatrix.needsUpdate = true;
     }
 
     chopTree(mesh, index, toolUsed) {
@@ -4328,6 +5320,9 @@ class TerrainScene {
         const emptyMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
         mesh.setMatrixAt(index, emptyMatrix);
         mesh.instanceMatrix.needsUpdate = true;
+        if (typeof ownerChunk.disableTreeCollider === 'function') {
+            ownerChunk.disableTreeCollider(mesh, index);
+        }
 
         const leafMesh = mesh.userData.leafMesh;
         if (leafMesh) {
@@ -4473,10 +5468,12 @@ class TerrainScene {
 
         this.axeModel = this.createToolViewmodelGroup('Stone Axe');
         this.clubModel = this.createToolViewmodelGroup('Stone Club');
-        this.viewmodelGroup.add(this.axeModel, this.clubModel);
+        this.pickaxeModel = this.createToolViewmodelGroup('Bone Pickaxe');
+        this.viewmodelGroup.add(this.axeModel, this.clubModel, this.pickaxeModel);
 
         this.loadToolViewmodelAsset('Stone Axe', this.axeModel);
         this.loadToolViewmodelAsset('Stone Club', this.clubModel);
+        this.loadToolViewmodelAsset('Bone Pickaxe', this.pickaxeModel);
         this.updateViewmodel();
     }
 
@@ -4519,6 +5516,7 @@ class TerrainScene {
         const def = this.toolDefinitions[toolType];
         if (!def?.modelPath || !holderGroup || !this.gltfLoader) return;
         const vm = def.viewmodel || {};
+        const family = this.getToolFamily(toolType);
 
         this.gltfLoader.load(
             def.modelPath,
@@ -4534,6 +5532,10 @@ class TerrainScene {
                     node.receiveShadow = false;
                     node.frustumCulled = false;
                 });
+
+                if (family === 'pickaxe') {
+                    this.preparePickaxeViewmodelMaterials(root, holderGroup);
+                }
 
                 const modelPos = vm.modelPosition || [0, 0, 0];
                 const modelRot = vm.modelRotation || [0, 0, 0];
@@ -4552,6 +5554,9 @@ class TerrainScene {
                 root.position.set(gripOffset[0], gripOffset[1], gripOffset[2]);
                 rig.add(root);
                 holderGroup.add(rig);
+                if (family === 'pickaxe') {
+                    this.applyPickaxeHeadTintForTool('Bone Pickaxe');
+                }
             },
             undefined,
             (error) => {
@@ -4560,11 +5565,173 @@ class TerrainScene {
         );
     }
 
+    inferPickaxeHeadMask(geometry) {
+        if (!geometry?.attributes?.position) {
+            return {
+                axis: new THREE.Vector3(0, 0, 1),
+                dir: 1,
+                start: 0,
+                end: 1
+            };
+        }
+
+        if (!geometry.boundingBox) geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        const min = bb.min;
+        const max = bb.max;
+        const spans = [max.x - min.x, max.y - min.y, max.z - min.z];
+        let axisIndex = 0;
+        if (spans[1] > spans[axisIndex]) axisIndex = 1;
+        if (spans[2] > spans[axisIndex]) axisIndex = 2;
+
+        const axis = new THREE.Vector3(
+            axisIndex === 0 ? 1 : 0,
+            axisIndex === 1 ? 1 : 0,
+            axisIndex === 2 ? 1 : 0
+        );
+
+        const minAxis = min.getComponent(axisIndex);
+        const maxAxis = max.getComponent(axisIndex);
+        const span = Math.max(1e-5, maxAxis - minAxis);
+        const edgeBand = span * 0.2;
+        const pos = geometry.attributes.position;
+        const centerA = (min.getComponent((axisIndex + 1) % 3) + max.getComponent((axisIndex + 1) % 3)) * 0.5;
+        const centerB = (min.getComponent((axisIndex + 2) % 3) + max.getComponent((axisIndex + 2) % 3)) * 0.5;
+
+        let minRadiusSum = 0;
+        let maxRadiusSum = 0;
+        let minCount = 0;
+        let maxCount = 0;
+        for (let i = 0; i < pos.count; i++) {
+            const p = axisIndex === 0
+                ? pos.getX(i)
+                : (axisIndex === 1 ? pos.getY(i) : pos.getZ(i));
+            const otherA = (axisIndex + 1) % 3 === 0
+                ? pos.getX(i)
+                : ((axisIndex + 1) % 3 === 1 ? pos.getY(i) : pos.getZ(i));
+            const otherB = (axisIndex + 2) % 3 === 0
+                ? pos.getX(i)
+                : ((axisIndex + 2) % 3 === 1 ? pos.getY(i) : pos.getZ(i));
+            const r = Math.hypot(otherA - centerA, otherB - centerB);
+            if (p <= minAxis + edgeBand) {
+                minRadiusSum += r;
+                minCount++;
+            }
+            if (p >= maxAxis - edgeBand) {
+                maxRadiusSum += r;
+                maxCount++;
+            }
+        }
+
+        // Head side has larger average radial size than the handle side.
+        const avgMinRadius = minCount > 0 ? (minRadiusSum / minCount) : 0;
+        const avgMaxRadius = maxCount > 0 ? (maxRadiusSum / maxCount) : 0;
+        const headAtMax = avgMaxRadius > avgMinRadius;
+        const dir = headAtMax ? 1 : -1;
+        const projMin = Math.min(minAxis * dir, maxAxis * dir);
+        const projMax = Math.max(minAxis * dir, maxAxis * dir);
+        const projSpan = Math.max(1e-5, projMax - projMin);
+
+        return {
+            axis,
+            dir,
+            start: projMin + projSpan * 0.60,
+            end: projMin + projSpan * 0.86
+        };
+    }
+
+    preparePickaxeViewmodelMaterials(root, holderGroup) {
+        holderGroup.userData.pickaxeTintMaterials = [];
+
+        root.traverse((node) => {
+            if (!node.isMesh) return;
+            const mask = this.inferPickaxeHeadMask(node.geometry);
+            const source = Array.isArray(node.material) ? node.material : [node.material];
+            const cloned = source.map((mat) => {
+                if (!mat || !mat.isMaterial) return mat;
+                const copy = mat.clone();
+                copy.userData = {
+                    ...(copy.userData || {}),
+                    pickaxeTintColor: new THREE.Color(0xf0f0ea)
+                };
+                copy.onBeforeCompile = (shader) => {
+                    shader.uniforms.uPickHeadColor = { value: copy.userData.pickaxeTintColor.clone() };
+                    shader.uniforms.uPickHeadAxis = { value: mask.axis.clone() };
+                    shader.uniforms.uPickHeadDir = { value: mask.dir };
+                    shader.uniforms.uPickHeadStart = { value: mask.start };
+                    shader.uniforms.uPickHeadEnd = { value: mask.end };
+
+                    shader.vertexShader = `
+                        varying vec3 vPickLocalPos;
+                    ` + shader.vertexShader;
+                    shader.vertexShader = shader.vertexShader.replace(
+                        '#include <begin_vertex>',
+                        `
+                        #include <begin_vertex>
+                        vPickLocalPos = position;
+                        `
+                    );
+
+                    shader.fragmentShader = `
+                        varying vec3 vPickLocalPos;
+                        uniform vec3 uPickHeadColor;
+                        uniform vec3 uPickHeadAxis;
+                        uniform float uPickHeadDir;
+                        uniform float uPickHeadStart;
+                        uniform float uPickHeadEnd;
+                    ` + shader.fragmentShader;
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        '#include <map_fragment>',
+                        `
+                        #include <map_fragment>
+                        float pickAxis = dot(vPickLocalPos, uPickHeadAxis) * uPickHeadDir;
+                        float pickHeadMask = smoothstep(uPickHeadStart, uPickHeadEnd, pickAxis);
+                        diffuseColor.rgb = mix(diffuseColor.rgb, uPickHeadColor, pickHeadMask);
+                        `
+                    );
+
+                    copy.userData.pickaxeTintUniform = shader.uniforms.uPickHeadColor;
+                };
+                copy.customProgramCacheKey = () => {
+                    return `pickaxeHeadTint-v2-${mask.axis.x}${mask.axis.y}${mask.axis.z}-${mask.dir}-${mask.start.toFixed(4)}-${mask.end.toFixed(4)}`;
+                };
+                holderGroup.userData.pickaxeTintMaterials.push(copy);
+                return copy;
+            });
+            node.material = Array.isArray(node.material) ? cloned : cloned[0];
+        });
+    }
+
+    applyPickaxeHeadTintForTool(toolType) {
+        const model = this.pickaxeModel;
+        if (!model) return;
+
+        const tintMaterials = model.userData.pickaxeTintMaterials || [];
+        if (tintMaterials.length === 0) return;
+
+        const tint = toolType === 'Copper Pickaxe'
+            ? new THREE.Color(0xcf7e38)
+            : new THREE.Color(0xf0f0ea);
+
+        for (const mat of tintMaterials) {
+            if (!mat?.userData) continue;
+            mat.userData.pickaxeTintColor = tint.clone();
+            if (mat.userData.pickaxeTintUniform?.value) {
+                mat.userData.pickaxeTintUniform.value.copy(tint);
+            }
+        }
+    }
+
     updateViewmodel() {
-        if (!this.axeModel || !this.clubModel) return;
+        if (!this.axeModel || !this.clubModel || !this.pickaxeModel) return;
         const activeTool = this.getActiveTool();
-        this.axeModel.visible = !!activeTool && activeTool.type === 'Stone Axe';
-        this.clubModel.visible = !!activeTool && activeTool.type === 'Stone Club';
+        const family = activeTool ? this.getToolFamily(activeTool.type) : '';
+        this.axeModel.visible = family === 'axe';
+        this.clubModel.visible = family === 'club';
+        this.pickaxeModel.visible = family === 'pickaxe';
+        if (family === 'pickaxe' && activeTool) {
+            this.applyPickaxeHeadTintForTool(activeTool.type);
+        }
     }
 
     toggleCrafting() {
@@ -4585,7 +5752,20 @@ class TerrainScene {
         const recipe = this.getCraftingRecipe(recipeId);
         if (!recipe) return false;
 
-        if (!this.hasIngredients(recipe.ingredients) || !this.consumeIngredients(recipe.ingredients)) {
+        if (!this.hasIngredients(recipe.ingredients) || !this.hasToolRequirements(recipe.toolRequirements)) {
+            this.showPickupFeedback("Missing Materials!", true);
+            return false;
+        }
+        if (!this.consumeIngredients(recipe.ingredients)) {
+            this.showPickupFeedback("Missing Materials!", true);
+            return false;
+        }
+
+        const consumedTools = this.consumeToolRequirements(recipe.toolRequirements);
+        if (recipe.toolRequirements && !consumedTools) {
+            for (const [itemKey, amount] of Object.entries(recipe.ingredients || {})) {
+                this.addInventoryItem(itemKey, amount);
+            }
             this.showPickupFeedback("Missing Materials!", true);
             return false;
         }
@@ -4594,6 +5774,7 @@ class TerrainScene {
             for (const [itemKey, amount] of Object.entries(recipe.ingredients || {})) {
                 this.addInventoryItem(itemKey, amount);
             }
+            this.restoreConsumedTools(consumedTools);
         };
 
         const result = recipe.result || {};
@@ -4638,6 +5819,10 @@ class TerrainScene {
         return this.craftFromRecipe('firepit');
     }
 
+    craftSmelter() {
+        return this.craftFromRecipe('smelter');
+    }
+
     craftTriWall() {
         return this.craftFromRecipe('tri_wall');
     }
@@ -4673,6 +5858,20 @@ class TerrainScene {
                 log.position.y = 0.3;
                 ghostGroup.add(log);
             }
+            this.placementGhost = ghostGroup;
+            this.scene.add(ghostGroup);
+        } else if (type === 'smelter') {
+            const ghostGroup = new THREE.Group();
+            const ghostMat = new THREE.MeshBasicMaterial({ color: 0x8a8d96, transparent: true, opacity: 0.55 });
+            const base = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 2.2, 1.2, 10), ghostMat);
+            base.position.y = 0.6;
+            ghostGroup.add(base);
+            const furnace = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.8, 2.2, 10), ghostMat);
+            furnace.position.y = 2.0;
+            ghostGroup.add(furnace);
+            const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 2.0, 8), ghostMat);
+            chimney.position.set(0, 3.7, -0.15);
+            ghostGroup.add(chimney);
             this.placementGhost = ghostGroup;
             this.scene.add(ghostGroup);
         } else if (type === 'wall') {
@@ -4752,6 +5951,13 @@ class TerrainScene {
             this.placementGhost = null;
             this.placementMode = null;
             this.showPickupFeedback("Firepit Placed!");
+        } else if (this.placementMode === 'smelter' && this.placementGhost) {
+            const smelter = new Smelter(this.scene, this.placementGhost.position);
+            this.smelters.push(smelter);
+            this.scene.remove(this.placementGhost);
+            this.placementGhost = null;
+            this.placementMode = null;
+            this.showPickupFeedback("Smelter Placed!");
         } else if (this.placementMode === 'wall' && this.placementGhost) {
             const wall = new Wall(this.scene, this.placementGhost.position, this.placementGhost.rotation.y);
             this.walls.push(wall);
@@ -4870,10 +6076,61 @@ class TerrainScene {
         return true;
     }
 
+    countToolsByType(type) {
+        return this.inventory.tools.filter(t => t.type === type).length;
+    }
+
+    hasToolRequirements(toolRequirements) {
+        if (!toolRequirements) return true;
+        for (const [toolType, amount] of Object.entries(toolRequirements)) {
+            if (this.countToolsByType(toolType) < amount) return false;
+        }
+        return true;
+    }
+
+    consumeToolRequirements(toolRequirements) {
+        if (!toolRequirements) return [];
+        if (!this.hasToolRequirements(toolRequirements)) return null;
+
+        const consumed = [];
+        for (const [toolType, amount] of Object.entries(toolRequirements)) {
+            let remaining = amount;
+            for (let i = this.inventory.tools.length - 1; i >= 0 && remaining > 0; i--) {
+                const tool = this.inventory.tools[i];
+                if (tool.type !== toolType) continue;
+                consumed.push({ type: tool.type, durability: tool.durability });
+                this.removeToolById(tool.id);
+                remaining--;
+            }
+        }
+
+        return consumed;
+    }
+
+    restoreConsumedTools(consumedTools) {
+        if (!consumedTools || consumedTools.length === 0) return;
+        for (const toolData of consumedTools) {
+            this.addToolToInventory(toolData.type, toolData.durability);
+        }
+    }
+
     addRecipeOutputs(outputs) {
         for (const [itemKey, amount] of Object.entries(outputs)) {
             this.addInventoryItem(itemKey, amount);
         }
+    }
+
+    addDebugResources(amount = 100) {
+        const keys = Object.keys(this.inventory).filter(
+            (key) => key !== 'tools' && typeof this.inventory[key] === 'number'
+        );
+        let totalAdded = 0;
+        for (const key of keys) {
+            totalAdded += this.addInventoryItem(key, amount);
+        }
+        this.updateInventoryUI();
+        this.showPickupFeedback(`Debug: +${amount} each resource`, true);
+        return totalAdded;
     }
 
     getSpoilageHint(itemKey) {
@@ -4976,11 +6233,11 @@ class TerrainScene {
             panel.style.zIndex = '1300';
             panel.style.pointerEvents = 'auto';
             panel.innerHTML = `
-                <h2 style="margin:0 0 8px 0; color:#ffb74d;">Firepit Cooking</h2>
+                <h2 style="margin:0 0 8px 0; color:#ffb74d;">Cooking & Smelting</h2>
                 <div id="cooking-target" style="font-size:12px; opacity:0.85; margin-bottom:12px;"></div>
                 <div id="cooking-recipes"></div>
                 <p style="font-size:11px; opacity:0.7; margin-top:12px;">
-                    Press <span class="key">E</span> on a firepit to open/close cooking.
+                    Press <span class="key">E</span> on a firepit or smelter to open/close.
                 </p>
             `;
             panel.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -4989,6 +6246,12 @@ class TerrainScene {
         }
 
         this.cookingPanel = panel;
+    }
+
+    getCookingStationType(station) {
+        if (!station) return '';
+        if (station instanceof Smelter) return 'smelter';
+        return 'firepit';
     }
 
     toggleCooking(firepit = null) {
@@ -5003,16 +6266,19 @@ class TerrainScene {
 
         if (!firepit && this.focusedItem?.type === 'firepit') {
             firepit = this.focusedItem.firepit || null;
+        } else if (!firepit && this.focusedItem?.type === 'smelter') {
+            firepit = this.focusedItem.smelter || null;
         }
 
         if (!firepit) {
-            this.showPickupFeedback('Look at a firepit to cook.', true);
+            this.showPickupFeedback('Look at a firepit or smelter.', true);
             return;
         }
 
         const distance = this.camera.position.distanceTo(firepit.group.position);
+        const stationLabel = this.getCookingStationType(firepit) === 'smelter' ? 'smelter' : 'firepit';
         if (distance > 35) {
-            this.showPickupFeedback('Too far from firepit.', true);
+            this.showPickupFeedback(`Too far from ${stationLabel}.`, true);
             return;
         }
 
@@ -5028,10 +6294,17 @@ class TerrainScene {
         if (!recipe) return;
         if (!this.cookingOpen || !this.activeCookingFirepit) return;
 
+        const stationType = this.getCookingStationType(this.activeCookingFirepit);
+        if ((recipe.station || 'firepit') !== stationType) {
+            this.showPickupFeedback(`This recipe needs a ${recipe.station || 'firepit'}.`, true);
+            return;
+        }
+
         const distance = this.camera.position.distanceTo(this.activeCookingFirepit.group.position);
         if (distance > 35) {
             this.toggleCooking();
-            this.showPickupFeedback('Moved too far from firepit.', true);
+            const stationLabel = this.getCookingStationType(this.activeCookingFirepit) === 'smelter' ? 'smelter' : 'firepit';
+            this.showPickupFeedback(`Moved too far from ${stationLabel}.`, true);
             return;
         }
 
@@ -5096,13 +6369,17 @@ class TerrainScene {
         const distance = this.activeCookingFirepit
             ? this.camera.position.distanceTo(this.activeCookingFirepit.group.position)
             : Infinity;
+        const stationType = this.getCookingStationType(this.activeCookingFirepit);
+        const stationLabel = stationType === 'smelter' ? 'Smelter' : 'Firepit';
         target.textContent = Number.isFinite(distance)
-            ? `Distance to firepit: ${distance.toFixed(1)}`
-            : 'No active firepit';
+            ? `${stationLabel} distance: ${distance.toFixed(1)}`
+            : 'No active station';
 
         recipesWrap.innerHTML = '';
+        let rendered = 0;
 
         for (const recipe of this.cookingRecipes) {
+            if ((recipe.station || 'firepit') !== stationType) continue;
             const canCook = this.hasIngredients(recipe.ingredients);
             const card = document.createElement('div');
             card.style.background = 'rgba(255,255,255,0.08)';
@@ -5142,6 +6419,13 @@ class TerrainScene {
             makes.textContent = `Makes: ${outputsText}`;
             card.appendChild(makes);
 
+            const stationLine = document.createElement('div');
+            stationLine.style.fontSize = '11px';
+            stationLine.style.marginTop = '2px';
+            stationLine.style.opacity = '0.72';
+            stationLine.textContent = `Station: ${(recipe.station || 'firepit')}`;
+            card.appendChild(stationLine);
+
             const btn = document.createElement('button');
             btn.textContent = canCook ? 'Cook' : 'Missing';
             btn.disabled = !canCook;
@@ -5159,6 +6443,15 @@ class TerrainScene {
             card.appendChild(btn);
 
             recipesWrap.appendChild(card);
+            rendered++;
+        }
+
+        if (rendered === 0) {
+            const empty = document.createElement('div');
+            empty.style.fontSize = '12px';
+            empty.style.opacity = '0.8';
+            empty.textContent = 'No recipes available for this station.';
+            recipesWrap.appendChild(empty);
         }
     }
 
@@ -5205,12 +6498,16 @@ class TerrainScene {
 
         if (this.cookingOpen && this.activeCookingFirepit) {
             const distance = this.camera.position.distanceTo(this.activeCookingFirepit.group.position);
+            const stationType = this.getCookingStationType(this.activeCookingFirepit);
+            const stationLabel = stationType === 'smelter' ? 'smelter' : 'firepit';
             if (distance > 38) {
                 this.toggleCooking();
-                this.showPickupFeedback('Too far from firepit.', true);
+                this.showPickupFeedback(`Too far from ${stationLabel}.`, true);
             } else {
                 const cookingTarget = document.getElementById('cooking-target');
-                if (cookingTarget) cookingTarget.textContent = `Distance to firepit: ${distance.toFixed(1)}`;
+                if (cookingTarget) {
+                    cookingTarget.textContent = `${stationLabel[0].toUpperCase() + stationLabel.slice(1)} distance: ${distance.toFixed(1)}`;
+                }
             }
         }
 
@@ -5518,6 +6815,8 @@ class TerrainScene {
             interactables.push(...chunk.branchMeshes);
             interactables.push(...chunk.bushMeshes);
             interactables.push(...chunk.stoneMeshes);
+            interactables.push(...chunk.copperOreMeshes);
+            interactables.push(...chunk.ironOreMeshes);
             interactables.push(...chunk.logMeshes);
             interactables.push(...chunk.mushroomMeshes);
             if (canChopTrees) {
@@ -5527,6 +6826,9 @@ class TerrainScene {
         interactables.push(...this.droppedItems);
         this.firepits.forEach((firepit) => {
             interactables.push(...firepit.interactionMeshes);
+        });
+        this.smelters.forEach((smelter) => {
+            interactables.push(...smelter.interactionMeshes);
         });
 
         const intersects = this.raycaster.intersectObjects(interactables);
@@ -5658,7 +6960,7 @@ class TerrainScene {
                     }
                 }
 
-                if (this.placementMode === 'firepit') this.placementGhost.position.y += 0.05;
+                if (this.placementMode === 'firepit' || this.placementMode === 'smelter') this.placementGhost.position.y += 0.05;
                 this.placementGhost.visible = true;
             } else {
                 this.placementGhost.visible = false;
@@ -5679,6 +6981,15 @@ class TerrainScene {
                 this.highlightMesh.position.y += 1.5;
                 this.highlightMesh.quaternion.identity();
                 this.highlightMesh.scale.set(1, 1, 1);
+                this.highlightMesh.visible = true;
+                return;
+            } else if (mesh.userData.isSmelter && mesh.userData.smelterRef) {
+                this.focusedItem = { mesh, index: null, type: 'smelter', smelter: mesh.userData.smelterRef };
+                this.highlightMesh.geometry = this.firepitHighlightGeometry;
+                this.highlightMesh.position.copy(mesh.userData.smelterRef.group.position);
+                this.highlightMesh.position.y += 1.8;
+                this.highlightMesh.quaternion.identity();
+                this.highlightMesh.scale.set(1.15, 1.25, 1.15);
                 this.highlightMesh.visible = true;
                 return;
             } else if (index !== undefined && typeof mesh.getMatrixAt === 'function') {
@@ -5906,6 +7217,20 @@ class TerrainScene {
             document.getElementById('btn-clouds').addEventListener('mousedown', (e) => e.stopPropagation());
         }
 
+        // Debug resources button
+        if (!document.getElementById('btn-debug-resources')) {
+            const div = document.createElement('div');
+            div.style.marginTop = '10px';
+            div.innerHTML = `<button id="btn-debug-resources" style="width:100%; padding: 5px; cursor: pointer; background:#ff7043; color:white;">+100 All Resources</button>`;
+            uiContainer.appendChild(div);
+
+            document.getElementById('btn-debug-resources').addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.addDebugResources(100);
+            });
+            document.getElementById('btn-debug-resources').addEventListener('mousedown', (e) => e.stopPropagation());
+        }
+
         // View Distance Slider
         // Check if already exists to avoid dupes on reload
         if (!document.getElementById('view-dist-slider')) {
@@ -5970,6 +7295,7 @@ class TerrainScene {
         const seconds = time * 0.001;
 
         this.controls.update(delta);
+        this.resolvePlayerCollisions();
         this.updateSurvivalSystems(delta, seconds);
 
         // Update Chunks
@@ -6002,9 +7328,12 @@ class TerrainScene {
 
         // Viewmodel Bobbing
         const activeTool = this.getActiveTool();
-        const activeModel = activeTool?.type === 'Stone Axe'
+        const activeFamily = activeTool ? this.getToolFamily(activeTool.type) : '';
+        const activeModel = activeFamily === 'axe'
             ? this.axeModel
-            : (activeTool?.type === 'Stone Club' ? this.clubModel : null);
+            : (activeFamily === 'club'
+                ? this.clubModel
+                : (activeFamily === 'pickaxe' ? this.pickaxeModel : null));
         if (activeModel && activeModel.visible) {
             const isMoving = this.controls.velocity.lengthSq() > 0.1;
             const bobSpeed = 10;
@@ -6032,6 +7361,7 @@ class TerrainScene {
             this.skeletonWarriors[i].update(delta, seconds, this.camera);
         }
         this.firepits.forEach(fp => fp.update(delta));
+        this.smelters.forEach(sm => sm.update(delta));
 
         // Update Falling Trees
         for (let i = this.activeFallingTrees.length - 1; i >= 0; i--) {
@@ -6076,3 +7406,4 @@ class TerrainScene {
 // The user's file has standard imports at top. We should restructure the file to add this import at top.
 
 new TerrainScene();
+

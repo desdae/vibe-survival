@@ -80,6 +80,41 @@
                 transform: rotate(360deg);
             }
         }
+
+        #crafting-panel {
+            width: min(94vw, 1100px);
+            max-height: 82vh;
+            overflow-y: auto;
+            box-sizing: border-box;
+        }
+
+        #crafting-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 12px;
+        }
+
+        #crafting-list>div {
+            margin-bottom: 0 !important;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        #crafting-list button {
+            align-self: center;
+        }
+
+        @media (max-width: 760px) {
+            #crafting-panel {
+                max-height: 86vh;
+            }
+
+            #crafting-list {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 
@@ -137,7 +172,7 @@
     </div>
 
     <div id="crafting-panel"
-        style="display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.85); color: white; padding: 30px; border-radius: 15px; border: 1px solid #4CAF50; backdrop-filter: blur(15px); min-width: 300px; text-align: center;">
+        style="display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.85); color: white; padding: 22px; border-radius: 15px; border: 1px solid #4CAF50; backdrop-filter: blur(15px); text-align: center;">
         <h2 style="color: #4CAF50; margin-top: 0;">🛠️ Crafting</h2>
         <div id="crafting-list">
             <!-- Stone Axe -->
@@ -154,12 +189,68 @@
                 <button id="btn-craft-club"
                     style="background: #607d8b; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Craft</button>
             </div>
+            <!-- Leather Strips -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Leather Strips</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: 1 Leather</p>
+                <button id="btn-craft-leather-strips"
+                    style="background: #8d6e63; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Craft</button>
+            </div>
+            <!-- Bone Axe -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Bone Axe</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: Stone Axe + 3 Bones + 1 Leather Strips</p>
+                <button id="btn-craft-bone-axe"
+                    style="background: #90a4ae; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Upgrade</button>
+            </div>
+            <!-- Bone Club -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Bone Club</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: Stone Club + 3 Bones + 1 Leather Strips</p>
+                <button id="btn-craft-bone-club"
+                    style="background: #78909c; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Upgrade</button>
+            </div>
+            <!-- Bone Pickaxe -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Bone Pickaxe</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: 3 Bones + 1 Leather Strips + 1 Stone</p>
+                <button id="btn-craft-bone-pickaxe"
+                    style="background: #7d91a1; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Craft</button>
+            </div>
+            <!-- Copper Pickaxe -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Copper Pickaxe</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: Bone Pickaxe + 2 Copper Ingots + 1 Leather Strips</p>
+                <button id="btn-craft-copper-pickaxe"
+                    style="background: #b87333; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Upgrade</button>
+            </div>
+            <!-- Metal Axe -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Metal Axe</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: Bone Axe + 2 Iron Ingots + 1 Copper Ingot + 1 Leather Strips</p>
+                <button id="btn-craft-metal-axe"
+                    style="background: #546e7a; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Upgrade</button>
+            </div>
+            <!-- Metal Club -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Metal Club</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: Bone Club + 1 Iron Ingot + 1 Copper Ingot + 1 Leather Strips</p>
+                <button id="btn-craft-metal-club"
+                    style="background: #455a64; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Upgrade</button>
+            </div>
             <!-- Firepit -->
             <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
                 <h3 style="margin: 0 0 10px 0;">Firepit</h3>
                 <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: 5 Logs, 2 Stones</p>
                 <button id="btn-craft-firepit"
                     style="background: #ff5722; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Craft</button>
+            </div>
+            <!-- Smelter -->
+            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">
+                <h3 style="margin: 0 0 10px 0;">Smelter</h3>
+                <p style="font-size: 12px; opacity: 0.8; margin: 5px 0;">Requires: 8 Stones, 4 Logs</p>
+                <button id="btn-craft-smelter"
+                    style="background: #607d8b; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; transition: opacity 0.2s;">Craft</button>
             </div>
             <!-- Wooden Wall -->
             <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px;">

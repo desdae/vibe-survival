@@ -1,6 +1,6 @@
-# Surv
+﻿# Surv
 
-`Surv` is a browser-based 3D survival sandbox with procedural terrain, gathering, crafting, building, and animal interactions.
+`Surv` is a browser-based 3D survival sandbox with procedural terrain, gathering, crafting, combat, and building.
 
 ## Run
 
@@ -25,102 +25,104 @@ npx serve .
 - `Space`: move up (free-fly) / jump (walk mode)
 - `Left Shift`: move down (free-fly)
 - `Left Ctrl`: sprint
-- `E`: pick up focused item / interact with firepit
+- `Left Click`: use active tool / place build piece
+- `E`: pick up focused item / interact with firepit or smelter
 - `C`: open/close crafting panel
 - `I`: open/close inventory grid
-- `X`: eat the best available food from inventory
-- `Left Click`: use active tool / place building piece
+- `X`: consume the best available food
 - `R`: rotate placement piece (`Triangle Wall` flips orientation)
 - `1..9` (or numpad): activate actionbar slot
 
 ## Core Features
 
 - Procedural mountainous terrain with chunk streaming.
-- Weather/environment toggles in UI: rain, mist, wind.
-- Volumetric cloud system with slow drifting clouds and UI toggle.
-- Camera mode toggle in UI: `Free-Fly` / `Walk`.
-- Inventory UI as an `8x5` slot grid with names, icons, and tooltips.
-- Inventory supports drag/drop rearranging and drag from inventory to actionbar.
-- Actionbar supports tools and food items.
-- Hunger + stamina survival loop with food-driven recovery and temporary buffs.
-- Firepit cooking UI with single-item and combo food recipes.
-- Food spoilage system with live countdown timers and weighted freshness blending.
-- Bottom-center 9-slot actionbar with drag-and-drop reordering.
-- UI sliders for camera speed and view distance.
+- UI environment toggles: rain, mist, wind, volumetric clouds.
+- Camera mode toggle: `Free-Fly` / `Walk`.
+- Inventory UI as an `8x5` grid with drag/drop reordering.
+- Drag food/tools from inventory to actionbar.
+- Bottom-center `1..9` actionbar with drag/drop slot rearranging.
+- Item stacks up to `999`.
+- Hunger + stamina loop with buffs from better food.
+- Food spoilage with live timers and weighted freshness blending.
+- Animated skeleton warriors spawn near the player start area.
 - Live FPS and triangle counters.
-- Animated undead skeleton warriors spawn near player start and roam using idle/walk/attack animations.
 
 ## Gathering and Resources
 
 - Gather with `E`: branches, stones, logs, berries, red mushrooms, yellow mushrooms.
-- Loot drops: `Raw Meat`, `Leather`
+- Ore nodes spawn as copper/iron deposits.
+- Ore deposits are solid meshes and hold multiple ore units.
+- Ore is mined one unit at a time.
+- Loot drops use physics, settle on slopes, and can be picked up with `E`.
+- Creature drops:
+- Pig: `1-3 Raw Meat`, `1 Leather`
+- Skeleton: `2-4 Bones`
 
-## Survival and Food
-
-- Hunger drains over time and drains faster while sprinting.
-- Stamina capacity and sprint effectiveness are influenced by current hunger.
-- Better cooked/combo foods restore more hunger/stamina and can grant temporary sprint/regen buffs.
-- Press `X` to consume the best available edible item quickly.
-- Food items spoil over time.
-- Spoilage is tuned to be relatively slow and degrades stacks gradually.
-- Spoilage timers in inventory update live.
-- Picking up fresh perishable food updates stack spoilage using weighted averaging, with a small freshness bonus.
-
-## Crafting
+## Crafting Progression
 
 - `Stone Axe`: `1 Branch + 2 Stones`
 - `Stone Club`: `1 Log + 1 Stone`
+- `Leather Strips`: `1 Leather -> 2 Leather Strips`
+- `Bone Axe`: `Stone Axe + 3 Bones + 1 Leather Strips`
+- `Bone Club`: `Stone Club + 3 Bones + 1 Leather Strips`
+- `Bone Pickaxe`: `3 Bones + 1 Leather Strips + 1 Stone`
+- `Copper Pickaxe`: `Bone Pickaxe + 2 Copper Ingots + 1 Leather Strips`
+- `Metal Axe`: `Bone Axe + 2 Iron Ingots + 1 Copper Ingot + 1 Leather Strips`
+- `Metal Club`: `Bone Club + 1 Iron Ingot + 1 Copper Ingot + 1 Leather Strips`
 - `Firepit`: `5 Logs + 2 Stones`
+- `Smelter`: `8 Stones + 4 Logs`
 - `Wooden Wall`: `2 Logs`
 - `Wooden Floor`: `2 Logs`
 - `Wooden Roof`: `2 Logs`
 - `Triangle Wall`: `1 Log`
 
-## Firepit Cooking
+## Tool Roles and Durability
 
-- Look at a placed `Firepit` and press `E` to open/close the cooking panel.
-- Cooking requires ingredient availability in your inventory.
-- Cooking recipes:
+- Crafted tools start at `100` durability.
+- Each use costs `1` durability.
+- Upgraded tools have higher max durability based on tool definition.
+- Axes are woodcutting tools (tree harvesting).
+- Clubs are melee weapons (no chopping, no ore mining).
+- Pickaxes are ore-mining tools:
+- `Bone Pickaxe` can mine copper (`tier 1` ore access).
+- `Copper Pickaxe` can mine copper and iron (`tier 2` ore access).
+- Pickaxe viewmodel head tint reflects tier:
+- Bone pickaxe head is white.
+- Copper pickaxe head is orange.
+
+## Cooking and Smelting
+
+- Look at a placed firepit or smelter and press `E` to open/close station cooking UI.
+- Firepit recipes:
 - `Cooked Meat`: `1 Raw Meat`
 - `Grilled Red Mushroom`: `1 Red Mushroom`
 - `Grilled Yellow Mushroom`: `1 Yellow Mushroom`
 - `Berry-Glazed Cut`: `1 Raw Meat + 2 Berries`
 - `Forest Skewer`: `1 Raw Meat + 1 Red Mushroom + 1 Yellow Mushroom`
 - `Hearty Stew`: `2 Raw Meat + 1 Red Mushroom + 1 Yellow Mushroom + 2 Berries`
+- `Charcoal`: `1 Log`
+- Smelter recipes:
+- `Copper Ingot`: `2 Copper Ore + 1 Charcoal`
+- `Iron Ingot`: `2 Iron Ore + 1 Charcoal`
 
-## Tools and Durability
+## Combat and Creatures
 
-- Crafted tools start at `100` durability.
-- Each use costs `1` durability.
-- Tools break automatically at `0` durability.
-- `Stone Axe` is for chopping trees.
-- `Stone Club` cannot chop trees.
-- First-person tool viewmodels use low-poly GLTF assets loaded from `assets/models/`.
-
-## Pig Combat and Loot
-
-- Club can hit pigs in melee range.
-- Pig stats: `10 HP`.
-- Club damage: `3` per hit.
-- Damaged pigs show floating health bars.
-- Pig death drops `1-3 Raw Meat` and `1 Leather`.
-- Drops scatter, spawn above terrain, fall with gravity, and can be picked up with `E`.
-- Meat and leather drop models are enlarged (~50%) for visibility.
-
-## Animal Grounding and Terrain Contact
-
-- Pigs and rabbits use per-leg vertical ground probing.
-- Animal body orientation aligns to local slope (not forced flat).
-- Terrain height sampling uses chunk triangle interpolation for accurate leg contact.
-- Drop support sampling keeps loot above terrain in uneven areas.
+- Club can hit pigs and skeletons in melee range.
+- Pig stats: `10 HP`, club base hit: `3 damage`.
+- Pigs show floating healthbars when damaged.
+- Skeletons show floating healthbars when damaged.
+- Pigs and rabbits use per-leg ground probing for better terrain contact.
 
 ## Building
 
 - Crafting build pieces enters placement mode.
-- Place with `Left Click`.
-- Rotate with `R`.
+- Place with `Left Click` and rotate with `R`.
 - Snap support exists between walls, floors, roofs, and triangle walls.
-- Placeable structures: `Firepit`, `Wooden Wall`, `Wooden Floor`, `Wooden Roof`, `Triangle Wall`.
+
+## Debug Helpers
+
+- Left-panel debug button: `+100 All Resources`.
+- Adds `100` of each inventory resource item for rapid testing.
 
 ## Icon Credits
 
@@ -128,13 +130,14 @@ npx serve .
 - Source: `https://game-icons.net/`
 - License: `CC BY 3.0`
 - License text: `https://github.com/game-icons/icons/blob/master/CC-BY-3.0.txt`
-- Icons are stored locally in `assets/icons/` and used by both inventory and actionbar UI.
+- Icons are stored locally in `assets/icons/`.
 
 ## Tool Model Credits
 
 - `Stone Axe` model source: `https://poly.pizza/m/lmO4Yq56e5`
-- `Stone Club` model source (using low-poly sledge hammer asset): `https://poly.pizza/m/yfAhQ8PECT`
+- `Stone Club` model source (low-poly sledge asset): `https://poly.pizza/m/yfAhQ8PECT`
+- `Pickaxe` model source (used for Bone/Copper Pickaxe): `https://poly.pizza/m/cJp88qPPLc`
 - `Skeleton Warrior` model source: `https://poly.pizza/m/wODZYCgX5Z`
 - Asset file host: `https://static.poly.pizza/`
-- License for all listed models: `Public Domain (CC0)`
+- License for listed models: `Public Domain (CC0)`
 - Model files are stored locally in `assets/models/`.

@@ -1,0 +1,9 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pickaxe icon">
+  <rect x="2" y="2" width="60" height="60" rx="10" fill="#122018" stroke="#6cc080" stroke-width="3"/>
+  <g transform="translate(32 32) rotate(-38)">
+    <rect x="-4" y="-22" width="8" height="44" rx="3" fill="#c89b66"/>
+    <rect x="-18" y="-30" width="36" height="8" rx="3" fill="#d7dde4"/>
+    <rect x="-20" y="-31" width="6" height="10" rx="2" fill="#9aa4b1"/>
+    <rect x="14" y="-31" width="6" height="10" rx="2" fill="#9aa4b1"/>
+  </g>
+</svg>
